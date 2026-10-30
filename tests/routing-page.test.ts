@@ -101,7 +101,24 @@ describe('the page keeps the chain the user typed', () => {
     // Without seeding, the panel would show "no chain yet" for a profile that
     // has three, and the first save would then delete all three.
     expect(page).toContain('seeded.current')
-    expect(page).toMatch(/setDrafts\(prev => seeded\.current \? prev : \(next\.combos \?\? \[\]\)\.map\(draftOf\)\)/u)
+    expect(page).toMatch(/if \(!seeded\.current\) \{/u)
+    expect(page).toMatch(/if \(!seeded\.current\) \{[\S\s]{0,120}?seeded\.current = true/u)
+  })
+  it('guards the seed synchronously rather than from inside a setState updater', () => {
+    // A functional updater does not run at the call site: React runs it during
+    // the commit, by which time `seeded.current` is already true, so the updater
+    // returned the previous (empty) array every time and `drafts` never left
+    // `[]`. The guard has to be a plain `if` around the call, which is what the
+    // gateway page has always done.
+    //
+    // `setDrafts(prev => ...)` is still fine elsewhere on this page — the editor,
+    // the add and the remove all need the previous array. What must not come
+    // back is reading `seeded.current` from inside one.
+    const seeds = [...pageCode.matchAll(/setDrafts\(([\S\s]{0,160}?)\)\s*$/gmu)]
+    expect(seeds.length).toBeGreaterThan(0)
+    for (const [, body] of seeds) {
+      expect(body).not.toContain('seeded.current')
+    }
   })
   it('re-reads the drafts from the save response so ids are the server ids', () => {
     expect(page).toMatch(/setDrafts\(\(next\.combos \?\? \[\]\)\.map\(draftOf\)\)/u)

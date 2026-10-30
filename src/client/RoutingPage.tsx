@@ -115,8 +115,10 @@ export function RoutingPage({ t }: RoutingPageProps) {
         // the first save would then wipe all three — the panel silently deleting
         // work because it never showed it. `seeded` keeps a later re-read from
         // discarding edits in flight.
-        setDrafts(prev => seeded.current ? prev : (next.combos ?? []).map(draftOf))
-        seeded.current = true
+        if (!seeded.current) {
+          seeded.current = true
+          setDrafts((next.combos ?? []).map(draftOf))
+        }
       }
     } catch (cause: unknown) {
       // Same contract as the provider page: a dead panel says so in place. The
