@@ -1,11 +1,33 @@
 # DSH XD Pool
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/dsh-xdpool"><img src="https://img.shields.io/npm/v/dsh-xdpool?style=flat-square&label=npm&color=cb3837" alt="npm version"></a>
-  <a href="https://www.npmjs.com/package/dsh-xdpool"><img src="https://img.shields.io/npm/dm/dsh-xdpool?style=flat-square&label=downloads&color=cb3837" alt="npm downloads"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/XDTrees/dsh-xdpool?style=flat-square" alt="MIT license"></a>
-  <a href="https://github.com/XDTrees/dsh-xdpool/stargazers"><img src="https://img.shields.io/github/stars/XDTrees/dsh-xdpool?style=flat-square" alt="GitHub stars"></a>
+  <a href="https://www.npmjs.com/package/@refeain/dsh-xdpool"><img src="https://img.shields.io/npm/v/%40refeain%2Fdsh-xdpool?style=flat-square&label=npm&color=cb3837" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@refeain/dsh-xdpool"><img src="https://img.shields.io/npm/dm/%40refeain%2Fdsh-xdpool?style=flat-square&label=downloads&color=cb3837" alt="npm downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Refeain/dsh-xdpool?style=flat-square" alt="MIT license"></a>
+  <a href="https://github.com/Refeain/dsh-xdpool/stargazers"><img src="https://img.shields.io/github/stars/Refeain/dsh-xdpool?style=flat-square" alt="GitHub stars"></a>
 </p>
+
+## About this repository
+
+This is a personal fork of [XDTrees/dsh-xdpool](https://github.com/XDTrees/dsh-xdpool), published as **`@refeain/dsh-xdpool`**.
+Publishing runs through this repository's own GitHub Actions workflow and npm trusted publishing — no token, no one-time password.
+
+The code matches upstream file for file; only these four locally verified deltas are kept:
+
+| File | Change | Why |
+| --- | --- | --- |
+| `tsdown.config.ts` | `PLUGIN_ID` now reads `name` from `package.json` instead of hard-coding `dsh-xdpool` | The client bundle registers its module with the host under this id, while the host builds its row from the **package name**. Rename the package and the two no longer meet: every bit of the plugin's UI disappears silently, with nothing in the logs |
+| `src/doubao-llm.ts` | Reasoning-level fallback now uses `DEFAULT_REASONING_LEVEL_ID` (`high`) | Upstream wrote `medium`, but the level table's id is `mid` — a fallback outside the table sends a level upstream does not recognise |
+| `package.json` | Package name `@refeain/dsh-xdpool`, `publishConfig.access: public`, `repository` pointing here | Publishing and provenance |
+| `cordis.patch.yml` | `name: '@refeain/dsh-xdpool'` | Must match the package name, or the host cannot find the plugin layer |
+
+Install this fork by its scoped name:
+
+```sh
+dsh plugin --profile desktop add @refeain/dsh-xdpool
+```
+
+> It is the same plugin as upstream's `dsh-xdpool`, registering the same `xdpool` provider group — **do not install both**.
 
 ## Join the group
 
@@ -17,13 +39,13 @@
   <b>Left: WeChat (bot)</b> — scanning only adds the bot. <b>Send “XD”</b> and it pulls you into the group; scanning alone does nothing.<br>
   <b>Right: QQ group</b> — scan and you are in. Group number 1103463688.
   <br>
-  <sub>Both groups are live; use whichever you prefer. If a code stops working, say so in <a href="https://github.com/XDTrees/dsh-xdpool/issues">issues</a> and it will be refreshed.</sub>
+  <sub>Both groups are live; use whichever you prefer. If a code stops working, say so in <a href="https://github.com/Refeain/dsh-xdpool/issues">issues</a> and it will be refreshed.</sub>
   <br>
   <sub>The 交流群 button next to “Star” in the card's top-right corner opens these same two codes — no need to come back to the README.</sub>
 </p>
 
 <p align="center">
-  <sub>The downloads badge reads <code>dsh-xdpool</code>'s own live npm stats now, not the pre-rename snapshot.</sub>
+  <sub>The downloads badge reads <code>@refeain/dsh-xdpool</code>'s own live npm stats now, not the pre-rename snapshot.</sub>
 </p>
 
 English | [中文](./README.md)
@@ -136,7 +158,7 @@ Prerequisite: the WorkBuddy desktop app installed and signed in (the plugin reus
 
 ```sh
 # if dsh is not on PATH, use node ~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js instead
-dsh plugin --profile desktop add dsh-xdpool
+dsh plugin --profile desktop add @refeain/dsh-xdpool
 ```
 
 > npm is the fast path: the only dependency pulled in is the plugin itself (**roughly 1 package, a few seconds**).
@@ -145,17 +167,17 @@ dsh plugin --profile desktop add dsh-xdpool
 **Option B — install from the GitHub source**
 
 ```sh
-dsh plugin --profile desktop add github:XDTrees/dsh-xdpool
+dsh plugin --profile desktop add github:Refeain/dsh-xdpool
 ```
 
 **Option C — register the bundle by hand**
 
 ```sh
 # 1) install the package (npm or GitHub)
-dsh plugin --profile desktop add dsh-xdpool
+dsh plugin --profile desktop add @refeain/dsh-xdpool
 
 # 2) register the bundle: edit ~/.dsh/profiles/desktop/package.json and append
-#    "dsh-xdpool" to the end of the "dsh" → "profile" → "bundles" array
+#    "@refeain/dsh-xdpool" to the end of the "dsh" → "profile" → "bundles" array
 
 # 3) restart DSH Desktop
 ```
@@ -165,7 +187,7 @@ dsh plugin --profile desktop add dsh-xdpool
 ```sh
 pnpm install
 pnpm build              # produces lib/index.js + lib/index.d.ts + lib/bin.js + lib/client.js
-pnpm test               # 138 tests
+pnpm test               # 1753 tests
 pnpm typecheck          # host side
 pnpm typecheck:client   # client side
 ```
@@ -213,17 +235,17 @@ Every startup writes this to `~/.dsh/.xdpool/startup.log`, so if you forget, the
 
 ## CLI
 
-All commands run through `dsh plugin --profile desktop exec dsh-xdpool <subcommand>`:
+All commands run through `dsh plugin --profile desktop exec @refeain/dsh-xdpool <subcommand>`:
 
 ```sh
-dsh plugin --profile desktop exec dsh-xdpool status    # pool accounts/cooldown + shim state (--credits, --json, --rates)
-dsh plugin --profile desktop exec dsh-xdpool accounts  # discovered accounts (--json)
-dsh plugin --profile desktop exec dsh-xdpool doctor    # diagnose discovery/cooldown/upstream
-dsh plugin --profile desktop exec dsh-xdpool reset     # clear all 429 cooldowns now
-dsh plugin --profile desktop exec dsh-xdpool checkin   # today's check-in state per account (--json)
-dsh plugin --profile desktop exec dsh-xdpool checkin all
+dsh plugin --profile desktop exec @refeain/dsh-xdpool status    # pool accounts/cooldown + shim state (--credits, --json, --rates)
+dsh plugin --profile desktop exec @refeain/dsh-xdpool accounts  # discovered accounts (--json)
+dsh plugin --profile desktop exec @refeain/dsh-xdpool doctor    # diagnose discovery/cooldown/upstream
+dsh plugin --profile desktop exec @refeain/dsh-xdpool reset     # clear all 429 cooldowns now
+dsh plugin --profile desktop exec @refeain/dsh-xdpool checkin   # today's check-in state per account (--json)
+dsh plugin --profile desktop exec @refeain/dsh-xdpool checkin all
                                                                  # collect every account's daily reward (or pass one label)
-dsh plugin --profile desktop exec dsh-xdpool login     # guide to adding another desktop account
+dsh plugin --profile desktop exec @refeain/dsh-xdpool login     # guide to adding another desktop account
 ```
 
 ## How accounts get into the pool
@@ -233,9 +255,9 @@ The desktop app keeps only the **currently signed-in** account on disk (each swi
 To snapshot an extra login explicitly (e.g. to pin one account for verification):
 
 ```sh
-dsh plugin --profile desktop exec dsh-xdpool import myKey
-dsh plugin --profile desktop exec dsh-xdpool accounts
-dsh plugin --profile desktop exec dsh-xdpool remove myKey
+dsh plugin --profile desktop exec @refeain/dsh-xdpool import myKey
+dsh plugin --profile desktop exec @refeain/dsh-xdpool accounts
+dsh plugin --profile desktop exec @refeain/dsh-xdpool remove myKey
 ```
 
 Imported snapshots live in the same directory, `~/.dsh/.xdpool/`, and every scan absorbs them into the pool — they are no longer written and never read back. Snapshots are named by the **MD5-8 prefix** of their key (so keys with Chinese, `/`, or spaces are safe). Long-lived use relies on refresh-token auto-renewal; if it lapses, re-sign-in on the desktop and `import <key> --force`.

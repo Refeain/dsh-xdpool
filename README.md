@@ -1,13 +1,37 @@
 # DSH XD Pool
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/dsh-xdpool"><img src="https://img.shields.io/npm/v/dsh-xdpool?style=flat-square&label=npm&color=cb3837" alt="npm version"></a>
-  <a href="https://www.npmjs.com/package/dsh-xdpool"><img src="https://img.shields.io/npm/dm/dsh-xdpool?style=flat-square&label=downloads&color=cb3837" alt="npm downloads"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/XDTrees/dsh-xdpool?style=flat-square" alt="MIT license"></a>
-  <a href="https://github.com/XDTrees/dsh-xdpool/stargazers"><img src="https://img.shields.io/github/stars/XDTrees/dsh-xdpool?style=flat-square" alt="GitHub stars"></a>
+  <a href="https://www.npmjs.com/package/@refeain/dsh-xdpool"><img src="https://img.shields.io/npm/v/%40refeain%2Fdsh-xdpool?style=flat-square&label=npm&color=cb3837" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@refeain/dsh-xdpool"><img src="https://img.shields.io/npm/dm/%40refeain%2Fdsh-xdpool?style=flat-square&label=downloads&color=cb3837" alt="npm downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Refeain/dsh-xdpool?style=flat-square" alt="MIT license"></a>
+  <a href="https://github.com/Refeain/dsh-xdpool/stargazers"><img src="https://img.shields.io/github/stars/Refeain/dsh-xdpool?style=flat-square" alt="GitHub stars"></a>
 </p>
 
+## 关于本仓库
+
+这是 [XDTrees/dsh-xdpool](https://github.com/XDTrees/dsh-xdpool) 的个人分支，发布为 **`@refeain/dsh-xdpool`**。
+发布走本仓库自己的 GitHub Actions + npm trusted publishing，不需要 token，也不需要一次性验证码。
+
+代码与上游逐文件相同，只多保留了下面四处在本地验证过的改动：
+
+| 文件 | 改动 | 为什么 |
+| --- | --- | --- |
+| `tsdown.config.ts` | `PLUGIN_ID` 改成读 `package.json` 的 `name`，不再硬编码 `dsh-xdpool` | 客户端 bundle 用这个 id 向宿主注册模块，而宿主按**包名**建行。包名一变两者对不上，插件的所有 UI 会静默消失，日志里一个字都不报 |
+| `src/doubao-llm.ts` | 推理档位兜底值改用 `DEFAULT_REASONING_LEVEL_ID`（`high`） | 上游写的是 `medium`，而档位表里的 id 叫 `mid` —— 兜底值不在表里，请求会带着上游不认的档位发出去 |
+| `package.json` | 包名 `@refeain/dsh-xdpool`、`publishConfig.access: public`、`repository` 指向本仓库 | 发布与来源标注 |
+| `cordis.patch.yml` | `name: '@refeain/dsh-xdpool'` | 与包名一致，否则宿主找不到插件层 |
+
+装这个分支要认准 scope：
+
+```sh
+dsh plugin --profile desktop add @refeain/dsh-xdpool
+```
+
+> 它和上游的 `dsh-xdpool` 是同一个插件、注册同一个 `xdpool` provider 分组，**不要两个都装**。
+
 ## 更新公告
+
+**3.0.8** — 包名换到 `@refeain/dsh-xdpool` 之后 UI 静默消失那个坑修好了（见上方「关于本仓库」）。
 
 **3.0.7** — UI 错位修复、一键更新真正生效、代际守卫不再空转。
 
@@ -37,13 +61,13 @@
   <b>左：微信（机器人）</b> —— 扫码添加机器人后<b>发送「XD」</b>，它才会拉你进群；只扫码不加不发是不会有反应的。<br>
   <b>右：QQ 群</b> —— 直接扫码即可加入，群号 1103463688。
   <br>
-  <sub>两个群都在，哪个方便用哪个。二维码失效了在 <a href="https://github.com/XDTrees/dsh-xdpool/issues">issues</a> 说一声会换新。</sub>
+  <sub>两个群都在，哪个方便用哪个。二维码失效了在 <a href="https://github.com/Refeain/dsh-xdpool/issues">issues</a> 说一声会换新。</sub>
   <br>
   <sub>卡片右上角「点Star」旁边的「交流群」按钮打开的是同样这两张码 —— 不用回头找 README。</sub>
 </p>
 
 <p align="center">
-  <sub>下载量徽章读的是 npm 上 <code>dsh-xdpool</code> 自己的实时统计，不再是改名前的快照。</sub>
+  <sub>下载量徽章读的是 npm 上 <code>@refeain/dsh-xdpool</code> 自己的实时统计，不再是改名前的快照。</sub>
 </p>
 
 [English](./README.en.md) | 中文
@@ -165,7 +189,7 @@
 
 ```sh
 # dsh 不在 PATH 时，用 node ~/.dsh/profiles/node_modules/@deepseek-ai/dsh/lib/bin.js 代替 dsh
-dsh plugin --profile desktop add dsh-xdpool
+dsh plugin --profile desktop add @refeain/dsh-xdpool
 ```
 
 > 推荐 npm：需要拉取的依赖只有插件自己（**约 1 个包，几秒搞定**）。
@@ -174,17 +198,17 @@ dsh plugin --profile desktop add dsh-xdpool
 **方式二：从 GitHub 源码安装**
 
 ```sh
-dsh plugin --profile desktop add github:XDTrees/dsh-xdpool
+dsh plugin --profile desktop add github:Refeain/dsh-xdpool
 ```
 
 **方式三：手动注册 bundle**
 
 ```sh
 # 1) 先装包（npm 或 GitHub 任选）
-dsh plugin --profile desktop add dsh-xdpool
+dsh plugin --profile desktop add @refeain/dsh-xdpool
 
 # 2) 注册 bundle：编辑 ~/.dsh/profiles/desktop/package.json，
-#    在 "dsh" → "profile" → "bundles" 数组末尾加上 "dsh-xdpool"
+#    在 "dsh" → "profile" → "bundles" 数组末尾加上 "@refeain/dsh-xdpool"
 
 # 3) 重启 DSH Desktop
 ```
@@ -194,7 +218,7 @@ dsh plugin --profile desktop add dsh-xdpool
 ```sh
 pnpm install
 pnpm build              # 产出 lib/index.js + lib/index.d.ts + lib/bin.js + lib/client.js
-pnpm test               # 814 项测试
+pnpm test               # 1753 项测试
 pnpm typecheck          # 宿主侧类型检查
 pnpm typecheck:client   # 客户端类型检查
 ```
@@ -242,17 +266,17 @@ agent-default-model:
 
 ## 命令行
 
-统一用 `dsh plugin --profile desktop exec dsh-xdpool <子命令>` 调用：
+统一用 `dsh plugin --profile desktop exec @refeain/dsh-xdpool <子命令>` 调用：
 
 ```sh
-dsh plugin --profile desktop exec dsh-xdpool status    # 池里几个号 / 几个冷却 + shim 状态（--credits 查积分、--json 机器可读、--rates 看倍率）
-dsh plugin --profile desktop exec dsh-xdpool accounts  # 已发现的账号（--json）
-dsh plugin --profile desktop exec dsh-xdpool doctor    # 诊断发现 / 冷却 / 上游连通性
-dsh plugin --profile desktop exec dsh-xdpool reset     # 立刻清掉所有 429 冷却
-dsh plugin --profile desktop exec dsh-xdpool checkin   # 查每个账号今天签到了没（--json 机器可读）
-dsh plugin --profile desktop exec dsh-xdpool checkin all
+dsh plugin --profile desktop exec @refeain/dsh-xdpool status    # 池里几个号 / 几个冷却 + shim 状态（--credits 查积分、--json 机器可读、--rates 看倍率）
+dsh plugin --profile desktop exec @refeain/dsh-xdpool accounts  # 已发现的账号（--json）
+dsh plugin --profile desktop exec @refeain/dsh-xdpool doctor    # 诊断发现 / 冷却 / 上游连通性
+dsh plugin --profile desktop exec @refeain/dsh-xdpool reset     # 立刻清掉所有 429 冷却
+dsh plugin --profile desktop exec @refeain/dsh-xdpool checkin   # 查每个账号今天签到了没（--json 机器可读）
+dsh plugin --profile desktop exec @refeain/dsh-xdpool checkin all
                                                                  # 领掉所有账号今天的签到奖励；也可以只传一个账号标签领单个
-dsh plugin --profile desktop exec dsh-xdpool login     # 教你怎么在桌面再加一个号进池
+dsh plugin --profile desktop exec @refeain/dsh-xdpool login     # 教你怎么在桌面再加一个号进池
 ```
 
 ## 池里怎么多账号？
@@ -263,10 +287,10 @@ dsh plugin --profile desktop exec dsh-xdpool login     # 教你怎么在桌面�
 
 ```sh
 # 在 WorkBuddy 桌面 App 登录账号后（key 自己起名）：
-dsh plugin --profile desktop exec dsh-xdpool import myKey
+dsh plugin --profile desktop exec @refeain/dsh-xdpool import myKey
 # 查看 / 删除已导入的快照：
-dsh plugin --profile desktop exec dsh-xdpool accounts
-dsh plugin --profile desktop exec dsh-xdpool remove myKey
+dsh plugin --profile desktop exec @refeain/dsh-xdpool accounts
+dsh plugin --profile desktop exec @refeain/dsh-xdpool remove myKey
 ```
 
 导入的快照与自动保存的账号存在同一个目录 `~/.dsh/.xdpool/` 下，每次扫描都会被一并收进池——不再是「导入了但没人读」。快照以 key 的 **MD5 前 8 位**命名（key 本身记在文件里），中文、带 `/`、带空格的 key 都安全。长期使用靠 refresh token 自动续期；失效了就回桌面重新登录，再 `import <key> --force` 覆盖。
