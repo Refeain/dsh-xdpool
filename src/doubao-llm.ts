@@ -21,6 +21,7 @@
  */
 import { cookieHeader, sessionUsable, type DoubaoSession } from './doubao-auth.ts'
 import {
+  DEFAULT_REASONING_LEVEL_ID,
   DOUBAO_MODELS,
   DOUBAO_REASONING_LEVELS,
   findDoubaoModel,
@@ -146,12 +147,17 @@ export function createDoubaoLlm(options: DoubaoLlmOptions): DoubaoLlm {
        * The reasoning level.
        *
        * The picker sends an opaque branded string; Doubao's levels are named. An unknown
-       * value falls back to the middle level, which every model in the family accepts.
+       * value falls back to DEFAULT_REASONING_LEVEL_ID, the level every model in the
+       * family accepts.
+       *
+       * 兜底值必须是 `DOUBAO_REASONING_LEVELS` 里真实存在的 id —— 否则上面的 some()
+       * 永远匹配不到它，请求会带着一个上游不认的档位发出去。这里以前写 `medium`：
+       * 那是 `LEVEL_NAMES` 的旧拼法（catalog 与 adapter 都叫 `mid`），不在档位表里。
        */
       const requested = streamOptions['reasoningEffort']
       const levelName = DOUBAO_REASONING_LEVELS.some(entry => entry.id === requested)
         ? String(requested)
-        : 'medium'
+        : DEFAULT_REASONING_LEVEL_ID
       const signal = streamOptions['signal'] instanceof AbortSignal
         ? streamOptions['signal'] as AbortSignal
         : new AbortController().signal
