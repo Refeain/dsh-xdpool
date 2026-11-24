@@ -12,7 +12,7 @@
 这是 [XDTrees/dsh-xdpool](https://github.com/XDTrees/dsh-xdpool) 的个人分支，发布为 **`@refeain/dsh-xdpool`**。
 发布走本仓库自己的 GitHub Actions + npm trusted publishing，不需要 token，也不需要一次性验证码。
 
-代码与上游逐文件相同，只多保留了下面四处在本地验证过的改动：
+代码与上游逐文件相同，只多保留了下面六处改动（都在本地跑过类型检查、构建与全部测试）：
 
 | 文件 | 改动 | 为什么 |
 | --- | --- | --- |
@@ -20,6 +20,8 @@
 | `src/doubao-llm.ts` | 推理档位兜底值改用 `DEFAULT_REASONING_LEVEL_ID`（`high`） | 上游写的是 `medium`，而档位表里的 id 叫 `mid` —— 兜底值不在表里，请求会带着上游不认的档位发出去 |
 | `package.json` | 包名 `@refeain/dsh-xdpool`、`publishConfig.access: public`、`repository` 指向本仓库 | 发布与来源标注 |
 | `cordis.patch.yml` | `name: '@refeain/dsh-xdpool'` | 与包名一致，否则宿主找不到插件层 |
+| `src/version.ts` | `POOL_VERSION` 跟着 `package.json` 走 | 卡片上显示的版本号；`tests/version-sync.test.ts` 会盯着这两者不许漂 |
+| `.github/workflows/publish.yml` | tag `v*` → OIDC 发布（`--provenance`） | 发布不需要任何 secret |
 
 装这个分支要认准 scope：
 

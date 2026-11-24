@@ -12,7 +12,7 @@
 This is a personal fork of [XDTrees/dsh-xdpool](https://github.com/XDTrees/dsh-xdpool), published as **`@refeain/dsh-xdpool`**.
 Publishing runs through this repository's own GitHub Actions workflow and npm trusted publishing — no token, no one-time password.
 
-The code matches upstream file for file; only these four locally verified deltas are kept:
+The code matches upstream file for file; only these six deltas are kept (typecheck, build and the full test suite all run locally):
 
 | File | Change | Why |
 | --- | --- | --- |
@@ -20,6 +20,8 @@ The code matches upstream file for file; only these four locally verified deltas
 | `src/doubao-llm.ts` | Reasoning-level fallback now uses `DEFAULT_REASONING_LEVEL_ID` (`high`) | Upstream wrote `medium`, but the level table's id is `mid` — a fallback outside the table sends a level upstream does not recognise |
 | `package.json` | Package name `@refeain/dsh-xdpool`, `publishConfig.access: public`, `repository` pointing here | Publishing and provenance |
 | `cordis.patch.yml` | `name: '@refeain/dsh-xdpool'` | Must match the package name, or the host cannot find the plugin layer |
+| `src/version.ts` | `POOL_VERSION` tracks `package.json` | The version shown on the card; `tests/version-sync.test.ts` keeps the two from drifting |
+| `.github/workflows/publish.yml` | tag `v*` → OIDC publish (`--provenance`) | Publishing needs no secrets at all |
 
 Install this fork by its scoped name:
 
