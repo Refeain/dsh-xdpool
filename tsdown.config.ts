@@ -1,6 +1,18 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'tsdown'
 
-const PLUGIN_ID = 'dsh-xdpool'
+/**
+ * The client bundle registers itself with `window.__ModuleLoader__.load({ id })`,
+ * and the Host builds its module graph (and the `/plugins/<id>/` route prefix)
+ * from the **package name** of the manifest it scanned. A hardcoded id therefore
+ * only works while the package keeps the upstream name: publish it under a scope
+ * (e.g. `@you/dsh-xdpool`) and the row the Host asks for and the id the bundle
+ * registers stop matching — the module silently never loads, so every UI the
+ * plugin injects (rail entry, pages) disappears with no error anywhere.
+ */
+const PLUGIN_ID: string = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+).name
 
 /**
  * Externalized browser-only packages that the Host supplies at runtime through
