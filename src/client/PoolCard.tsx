@@ -1493,6 +1493,16 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
         : (accountCount > 0 && cooling < accountCount ? 'ok' : 'cooling'),
     }
   }
+  /**
+   * 插件池账号（WorkBuddy）要不要显示。
+   *
+   * **只有选中 `buddy` / `workbuddy` 时才显示**；没选渠道、或选中别的渠道都不显示。
+   * 这些账号属于那两条 lane，挂在别人的详情上面就会变成「点开 CodeArts 还看到
+   * WorkBuddy 的账号」—— 用户反馈的就是这个。
+   */
+  const showPoolAccounts = selectedChannel === REGION_CHANNEL_BY_REGION.cn
+    || selectedChannel === REGION_CHANNEL_BY_REGION.global
+
   /*
    * The pool page's own header. The pages that read a different document
    * (channels, providers) render theirs, because each has its own actions and
@@ -1585,7 +1595,12 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                   是 height:100vh + overflow:hidden —— 第二行直接被裁掉。所以交给
                   ChannelPoolSection 渲染进详情列的 mbody，和 banner 同一条通路。
                 */
-                regionCards={(['cn', 'global'] as const).map(region => {
+                /*
+                  只在「WorkBuddy 区域」显示插件池账号，或者一个渠道都没选的时候。
+                  插件池账号就是 WorkBuddy 的；选中 CodeArts / TRAE 时把 WorkBuddy 的
+                  账号卡堆在它的详情上面，用户看到的是两块互不相干的内容挤在一列。
+                */
+                                regionCards={showPoolAccounts ? (['cn', 'global'] as const).map(region => {
                   const here = statusOf(region)
                   const rows = here?.accounts ?? []
                   if (rows.length === 0) return null
@@ -1603,7 +1618,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                         自包含的小卡片（account-card.tsx），不是 2.x 的 AccountBlock：
                         后者用渠道行的类名，挂进 3.0 的页面会把布局挤坏。
                       */}
-                      <div className="xdp-accts">
+                      <div className="accts">
                         {rows.map(account => (
                           <AccountCard
                             key={account.id}
@@ -1621,7 +1636,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                       </div>
                     </section>
                   )
-                })}
+                }) : undefined}
                 active={selectedChannel}
                 onAddAccount={() => { setPage('channels') }}
                 autoClaim={statusOf('cn')?.automation?.enabled === true}

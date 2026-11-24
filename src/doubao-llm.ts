@@ -147,14 +147,13 @@ export function createDoubaoLlm(options: DoubaoLlmOptions): DoubaoLlm {
        * The reasoning level.
        *
        * The picker sends an opaque branded string; Doubao's levels are named. An unknown
-       * value falls back to DEFAULT_REASONING_LEVEL_ID, the level every model in the
-       * family accepts.
-       *
-       * 兜底值必须是 `DOUBAO_REASONING_LEVELS` 里真实存在的 id —— 否则上面的 some()
-       * 永远匹配不到它，请求会带着一个上游不认的档位发出去。这里以前写 `medium`：
-       * 那是 `LEVEL_NAMES` 的旧拼法（catalog 与 adapter 都叫 `mid`），不在档位表里。
+       * value falls back to the middle level, which every model in the family accepts.
        */
       const requested = streamOptions['reasoningEffort']
+      // The fallback must be an id that actually exists in DOUBAO_REASONING_LEVELS:
+      // the `some()` above can only match a real id, so any other literal answer
+      // ships a level the wire does not know. It used to say 'medium' — the old
+      // spelling of LEVEL_NAMES; the catalog and the adapter both call that `mid`.
       const levelName = DOUBAO_REASONING_LEVELS.some(entry => entry.id === requested)
         ? String(requested)
         : DEFAULT_REASONING_LEVEL_ID
