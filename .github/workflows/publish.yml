@@ -1,11 +1,11 @@
 name: Publish
 
 # 发布到 npm，走 OIDC trusted publishing —— 不需要任何 npm token、不需要一次性验证码。
-# 前提：这个包在 npm 上已经存在，并且 npm 上已把 @refeain/dsh-xdpool 绑定到
+# 前提：包在 npm 上已存在，且 npm 上已把 @refeain/dsh-xdpool 绑定到
 #       仓库 Refeain/dsh-xdpool、工作流文件名 publish.yml。
 #
-# 用法：打一个 v 开头的 tag（git tag v3.0.6 && git push origin v3.0.6），
-#       或者到 Actions 页面手动 Run workflow。
+# 用法：推一个 v 开头的 tag（git tag v3.0.6 && git push origin v3.0.6），
+#       或到 Actions 页面手动 Run workflow。
 
 on:
   push:
@@ -51,6 +51,18 @@ jobs:
           fi
 
       # lib/ 是随仓库提交的构建产物（上游惯例：PR 里都带 lib/）。
-      # 用 --ignore-scripts 发布，保证发上去的就是仓库里这份、不在 CI 里重新构建产生差异。
+      # 用 --ignore-scripts 发布，保证发上去的就是仓库里这份，不在 CI 里重新构建产生差异。
+      #
+      # 失败时把 npm 的原始报错塞进 ::error:: 注解——因为这个仓库拿不到 job log
+      # （/actions/jobs/<id>/logs 返回 401 InvalidAuthenticationInfo），只能靠注解回传。
       - name: Publish
-        run: npm publish --provenance --access public --ignore-scripts
+        run: |
+          set +e
+          out="$(npm publish --provenance --access public --ignore-scripts 2>&1)"
+          code=$?
+          printf '%s\n' "$out"
+          if [ $code -ne 0 ]; then
+            msg="$(printf '%s\n' "$out" | grep -iE 'npm error|ERR_|EOTP|ENEEDAUTH|EPUBLISH|403|401|404|409' | head -5 | tr '\n' ' ' | cut -c1-900)"
+            echo "::error::publish exit $code :: $msg"
+            exit $code
+          fi
