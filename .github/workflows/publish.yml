@@ -1,0 +1,56 @@
+name: Publish
+
+# 发布到 npm，走 OIDC trusted publishing —— 不需要任何 npm token、不需要一次性验证码。
+# 前提：这个包在 npm 上已经存在，并且 npm 上已把 @refeain/dsh-xdpool 绑定到
+#       仓库 Refeain/dsh-xdpool、工作流文件名 publish.yml。
+#
+# 用法：打一个 v 开头的 tag（git tag v3.0.6 && git push origin v3.0.6），
+#       或者到 Actions 页面手动 Run workflow。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC 换取发布凭据，缺这一行会直接失败
+
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile --config.auto-install-peers=false
+
+      - name: Check tag matches version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "package.json = $pkg, tag = $tag"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+
+      # lib/ 是随仓库提交的构建产物（上游惯例：PR 里都带 lib/）。
+      # 用 --ignore-scripts 发布，保证发上去的就是仓库里这份、不在 CI 里重新构建产生差异。
+      - name: Publish
+        run: npm publish --provenance --access public --ignore-scripts
