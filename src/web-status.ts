@@ -27,6 +27,7 @@ import { isGatewayRejectionError, regionOf, type WorkBuddyUpstreamClient } from 
 import type { WorkBuddyShim } from './shim.ts'
 import type { UsageSummary } from './stats.ts'
 import { isAutomationJobKind, type AutomationRunSummary, type AutomationStatus } from './scheduler.ts'
+import { redactSecrets } from './redact.ts'
 import { hasModelsListing, isProviderId } from './providers.ts'
 import { PROVIDER_NOTES_ZH } from './provider-notes-zh.ts'
 import { listProviderStates, providerApiKeys, providerEnabled, type AggregateStore } from './store.ts'
@@ -319,7 +320,6 @@ export interface PoolStatusRouteOptions {
   /** Apply a relay patch, re-evaluate the listener, and answer with the new state. */
   saveRelay?: (patch: PoolWebRelayPatch) => Promise<PoolWebRelayStatus>
 }
-/** Redact token-like content before it crosses to the browser. */
 /**
  * A zeroed-out automation job record.
  *
@@ -329,11 +329,10 @@ export interface PoolStatusRouteOptions {
 function emptyAutomationJob(): PoolWebAutomationJob {
   return { ok: 0, failed: 0, credit: 0, energy: 0, claimed: 0 }
 }
+/** Redact token-like content before it crosses to the browser. */
 function safeMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error))
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gu, '[redacted token]')
-    .replace(/(\b(?:code|token|refresh_token|access_token)=)[^&\s]+/giu, '$1[redacted]')
-    .slice(0, 500)
+  const text = error instanceof Error ? error.message : String(error)
+  return redactSecrets(text).slice(0, 500)
 }
 function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)

@@ -175,9 +175,52 @@ function automationHours(status: PoolWebStatus, kind: AutomationJobKind): readon
     case 'compensation': return automation.compensationHours
   }
 }
-/** Read one job's last-run record off the status document. */
-function automationJob(status: PoolWebStatus, kind: AutomationJobKind): PoolWebAutomationJob | undefined {
-  return status.automation?.jobs[kind]
+/**
+ * Every job record on one region's status document, in the panel's own order.
+ *
+ * Reading them all (rather than a single job) is what the automation panel
+ * needs: the "credit automation" switch covers six passes — check-in, activity
+ * report, task rewards, streak, cat trip, outage compensation — and a failure
+ * in any one of them is the user's business. The order matches
+ * `AutomationJobKind` so the summary reads the same way every time instead of
+ * depending on which job happened to fail.
+ */
+function automationJobs(status: PoolWebStatus | undefined): PoolWebAutomationJob[] {
+  const jobs = status?.automation?.jobs
+  if (jobs === undefined) return []
+  return AUTOMATION_JOBS.map(kind => jobs[kind])
+}
+/**
+ * How many failure lines the panel shows before folding the rest into a count.
+ *
+ * Every account can fail, and each reason is capped at 200 characters upstream,
+ * so a full six-account failure would put >1200 characters of error text into a
+ * panel that exists to answer "did it work". Measured with the real stylesheet:
+ * that is 24 rows on a 1280px card and 21 on a 390px one — not an overflow bug,
+ * but it pushes the rest of the page off screen. Two lines is enough to tell
+ * "one flaky account" from "the whole pool is down"; the rest stay in the data
+ * for anything that wants to read them.
+ */
+const FAILURE_LINES_SHOWN = 2
+/**
+ * The failure lines from the most recent run that had any, as one sentence.
+ *
+ * `undefined` when nothing failed — which is what keeps the panel's warning row
+ * absent rather than present-and-empty. When several accounts failed the lines
+ * are joined with a middle dot: they are peers, not a hierarchy, and a full
+ * stop would read as a paragraph. The list is already redacted and already
+ * carries each account's masked label, so no scrubbing happens here.
+ *
+ * Past `FAILURE_LINES_SHOWN` the remainder collapses to `+N`: the count still
+ * says how widespread the failure is without reproducing every message.
+ */
+function automationFailures(status: PoolWebStatus | undefined): string | undefined {
+  const lines = automationJobs(status)
+    .flatMap(job => job.failures ?? [])
+  if (lines.length === 0) return undefined
+  const shown = lines.slice(0, FAILURE_LINES_SHOWN)
+  const hidden = lines.length - shown.length
+  return hidden > 0 ? `${shown.join(' · ')} · +${String(hidden)}` : shown.join(' · ')
 }
 function dotColor(status: 'ok' | 'error' | 'idle'): string {
   return status === 'ok'
@@ -1644,6 +1687,8 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                 onAutoClaim={on => { void setAutomationEnabled('cn', on) }}
                 autoClaimRunning={automationRun !== undefined}
                 onAutoClaimRun={() => { void runAutomationJob('cn') }}
+                autoClaimReport={automationFailures(statusOf('cn'))}
+                autoClaimFailing={automationJobs(statusOf('cn')).some(job => job.failed > 0)}
                 /*
                   提示条放进详情列的 mbody 里。之前它们是 .app 网格的直接子元素，
                   一出现就占一个格子，把三列挤乱。

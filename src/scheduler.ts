@@ -25,6 +25,8 @@
 import type { WorkBuddyAccount, WorkBuddyAccountPool, WorkBuddyCredential } from './accounts'
 import { randomUUID } from 'node:crypto'
 import { isAlreadyCheckin, isNoCompensation, regionOf } from './upstream'
+import { describeError } from './diagnostics.ts'
+import { redactSecrets } from './redact.ts'
 import type { WorkBuddyRegion, WorkBuddyTask, WorkBuddyUpstreamClient } from './upstream'
 import {
   APPEARANCE_THEME_KEY, LIGHTHOUSE_EXPERT_ID, automationChain, appearanceChain, buddyAppChain,
@@ -251,6 +253,19 @@ export interface AutomationJobState {
    */
   progress?: string
   message?: string
+  /**
+   * Why each failing account failed, one line per account, already redacted.
+   *
+   * `message` counts the failures; this names them. Without it the card could
+   * say "4 accounts ok, 2 failed" and nothing else — and the reason lived only
+   * in `logger.warn`, which on a desktop box goes to a log nobody opens. That
+   * made "this gateway has no check-in activity" (waiting will never help)
+   * indistinguishable from "the token expired" (sign in again works).
+   *
+   * Absent when the last run had no failures, rather than an empty array, so a
+   * stale reason from a previous run cannot survive a clean one.
+   */
+  failures?: readonly string[]
 }
 
 
@@ -1134,6 +1149,15 @@ export class WorkBuddyScheduler {
      * distinguishable from "0 tasks, everything already collected".
      */
     const items: PoolWebAutomationItem[] = []
+    /**
+     * One line per account that threw, already redacted.
+     *
+     * Kept beside `detail` rather than read back out of it because `summarise`
+     * needs the reasons WITHOUT the account labels it already prefixes — and
+     * because `detail` also carries success lines ("签到 +5"), which a
+     * positional convention over a mixed list would eventually get wrong.
+     */
+    const failureNotes: string[] = []
     let progressNote: string | undefined
     
     // Give benched accounts a chance to come back BEFORE the run, not after.
@@ -1273,6 +1297,25 @@ export class WorkBuddyScheduler {
         // their daily points.
         failed++
         this.logger.warn?.(`automation ${accountWord} ${account.label} failed:`, error)
+        /*
+         * Name the failure instead of only counting it.
+         *
+         * `message` used to end at "4 accounts ok, 2 failed" with an empty
+         * `detail`, so the reader knew two accounts broke but not which two or
+         * why — and the one place the reason did land was `logger.warn`, which
+         * on this machine goes nowhere a person can open. Upstream answers such
+         * as "check-in activity is not enabled on this gateway" were therefore
+         * invisible, and the honest reading of the card was "the feature is
+         * broken".
+         *
+         * The label is the account's own masked label (`151****5212#ce0b5046`),
+         * so naming the account does not print the phone number or the mailbox.
+         * The reason is redacted before it is stored because an upstream error
+         * can echo the request it rejected, tokens included.
+         */
+        const reason = redactSecrets(describeError(error)).slice(0, 200)
+        detail.push(`${account.label} ${accountWord} failed: ${reason}`)
+        failureNotes.push(`${account.label}: ${reason}`)
       }
       // Serial spacing, but never sleep after the final account.
       if (index < accounts.length - 1 && this.delayMs > 0 && !this.stopped) await sleep(this.delayMs)
@@ -1300,6 +1343,16 @@ export class WorkBuddyScheduler {
     state.energy = energy
     state.claimed = claimed
     state.message = this.summarise(kind, ok, failed, claimed, credit, energy)
+    /*
+     * Per-account failure reasons for the card.
+     *
+     * `message` is the count and stays one line; this is what the count cannot
+     * say. Both are kept because they answer different questions: "did the pass
+     * work" (message) and "if not, which account and what did it say" (this).
+     * Cleared when there were no failures so the card never shows a stale one.
+     */
+    if (failureNotes.length === 0) delete state.failures
+    else state.failures = failureNotes
     state.detail = detail
     state.items = items
     // Cleared explicitly when this run produced no milestone: `progress` is a

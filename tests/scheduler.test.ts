@@ -955,6 +955,62 @@ describe('manual run-all', () => {
     const summary = await scheduler.runAll()
     expect(summary.failed).toBe(1)
   })
+
+  it('names the account and the reason, not just the count', async () => {
+    // The defect this guards: the card read "1 accounts ok, 1 failed" and
+    // stopped there. The reason existed only in `logger.warn`, which on a
+    // desktop box goes to a file nobody opens — so "this gateway has no
+    // check-in activity" (waiting will never help) looked exactly like "the
+    // token expired" (signing in again works).
+    const { pool, upstream } = await harness(1)
+    upstream.failOn.add('checkin')
+    const scheduler = new WorkBuddyScheduler(pool, upstream.client, {
+      enabled: true,
+      checkinHours: [],
+      reportHours: [],
+      taskHours: [],
+      streakHours: [],
+      accountDelayMs: 0,
+      eventScoreWaitMs: 0,
+      expertGapMs: 0,
+      now: () => beijing(2026, 8, 23, 9, 0, 0),
+      logger: {},
+    })
+    await scheduler.runAll()
+    const job = scheduler.status().jobs.checkin
+    expect(job.failed).toBe(1)
+    expect(job.failures).toHaveLength(1)
+    // The harness throws `boom: checkin` and `describeError` prefixes the error
+    // name, so the upstream's own words have to survive all the way here.
+    expect(job.failures?.[0]).toContain('boom: checkin')
+    // Named by its MASKED label — that is what keeps the phone number and the
+    // mailbox out of a line the user is likely to screenshot.
+    expect(job.failures?.[0]).toContain(pool.list()[0]!.label)
+  })
+
+  it('clears the reasons once a later run has none', async () => {
+    // A stale red line is worse than no line: it tells the reader something is
+    // still broken when the previous run already fixed it.
+    const { pool, upstream } = await harness(1)
+    upstream.failOn.add('checkin')
+    const scheduler = new WorkBuddyScheduler(pool, upstream.client, {
+      enabled: true,
+      checkinHours: [],
+      reportHours: [],
+      taskHours: [],
+      streakHours: [],
+      accountDelayMs: 0,
+      eventScoreWaitMs: 0,
+      expertGapMs: 0,
+      now: () => beijing(2026, 8, 23, 9, 0, 0),
+      logger: {},
+    })
+    await scheduler.runAll()
+    expect(scheduler.status().jobs.checkin.failures).toHaveLength(1)
+    upstream.failOn.delete('checkin')
+    await scheduler.runAll()
+    expect(scheduler.status().jobs.checkin.failures).toBeUndefined()
+  })
 })
 
 describe('event-scored tasks', () => {

@@ -1235,6 +1235,19 @@ export interface PoolWebAutomationJob {
   /** One-line summary of the last run. */
   message?: string
   /**
+   * Why each failing account failed, one line per account, already redacted.
+   *
+   * `message` counts the failures; this names them. Before it existed the card
+   * could say "4 accounts ok, 2 failed" and nothing else, so an account that
+   * failed because the gateway has no check-in activity read exactly like one
+   * whose token expired — two opposite pieces of advice at the same glance.
+   *
+   * Absent rather than empty when the last run had no failures: the card keys
+   * its warning line off presence, and an empty array would keep a stale line
+   * of red on screen after a clean run.
+   */
+  failures?: readonly string[]
+  /**
    * What the last run actually did, in the words of the task board.
    *
    * `message` is a count; this is the list a person can check off, which is

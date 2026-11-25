@@ -1251,7 +1251,7 @@ async function fetchOwnSession(channel: string): Promise<
  * `active` 为空时（首次进入、或选中的渠道被移除）退回第一家，这样右栏
  * 永远不会是空的。
  */
-export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoClaimBusy, onAutoClaim, autoClaimRunning, onAutoClaimRun, banner, regionCards }: {
+export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoClaimBusy, onAutoClaim, autoClaimRunning, onAutoClaimRun, autoClaimReport, autoClaimFailing, banner, regionCards }: {
   readonly t?: Translate | undefined
   /** 中栏选中的渠道 id；空则显示第一家。 */
   readonly active?: string | undefined
@@ -1265,6 +1265,17 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   /** Run one automation pass now, instead of waiting for the scheduled hour. */
   readonly onAutoClaimRun?: (() => void) | undefined
   readonly onAutoClaim?: ((on: boolean) => void) | undefined
+  /**
+   * 最近一轮自动化的结果，直接显示在这块面板里。
+   *
+   * 这段文字此前不存在：调度器把「4 accounts ok, 2 failed」存进 message，
+   * 但页面上没有任何一处读它 —— 用户只能看到「今日已领 0/4」，看不出是两个
+   * 账号因为「这个网关没有签到活动」而失败（不是故障，等也没有用），还是
+   * token 过期（重新登录就好）。两条完全不同的处置方式，在界面上长得一样。
+   */
+  readonly autoClaimReport?: string | undefined
+  /** 最近一轮里有没有账号失败 —— 决定上面那行用警示色还是普通色。 */
+  readonly autoClaimFailing?: boolean | undefined
   /** 外层的提示条，放进详情列 mbody 顶部（不能落在 .app 网格里）。 */
   readonly banner?: ReactNode | undefined
   /**
@@ -2977,6 +2988,23 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
               <span className="policy-hint">
                 {t?.('channelpool.autoClaimHint') ?? '开着就会在后台领每天的积分，不用手动点。'}
               </span>
+              {/*
+                最近一轮的结果。放在提示语下面而不是另起一块：它回答的是同一个
+                问题的下一句 ——「开着会领」之后自然就是「上一轮领成什么样」。
+
+                用设计稿既有的 .sum-sub + data-tone，不新造类名也不写内联样式：
+                正常时是 --faint 的灰（和上面那句提示同一个色阶，不抢注意力），
+                有账号失败时 data-tone="err" 走 --danger
+                （design-css.ts:1485 `.sum-sub[data-tone="err"]{color:var(--danger)}`）。
+              */}
+              {autoClaimReport === undefined ? null : (
+                <span
+                  className="sum-sub"
+                  {...autoClaimFailing === true ? { 'data-tone': 'err' } : {}}
+                >
+                  {autoClaimReport}
+                </span>
+              )}
             </div>
           )}
         </div>

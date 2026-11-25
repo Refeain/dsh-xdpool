@@ -2541,6 +2541,19 @@ interface PoolWebAutomationJob {
   /** One-line summary of the last run. */
   message?: string;
   /**
+   * Why each failing account failed, one line per account, already redacted.
+   *
+   * `message` counts the failures; this names them. Before it existed the card
+   * could say "4 accounts ok, 2 failed" and nothing else, so an account that
+   * failed because the gateway has no check-in activity read exactly like one
+   * whose token expired — two opposite pieces of advice at the same glance.
+   *
+   * Absent rather than empty when the last run had no failures: the card keys
+   * its warning line off presence, and an empty array would keep a stale line
+   * of red on screen after a clean run.
+   */
+  failures?: readonly string[];
+  /**
    * What the last run actually did, in the words of the task board.
    *
    * `message` is a count; this is the list a person can check off, which is
@@ -3850,6 +3863,19 @@ interface AutomationJobState {
    */
   progress?: string;
   message?: string;
+  /**
+   * Why each failing account failed, one line per account, already redacted.
+   *
+   * `message` counts the failures; this names them. Without it the card could
+   * say "4 accounts ok, 2 failed" and nothing else — and the reason lived only
+   * in `logger.warn`, which on a desktop box goes to a log nobody opens. That
+   * made "this gateway has no check-in activity" (waiting will never help)
+   * indistinguishable from "the token expired" (sign in again works).
+   *
+   * Absent when the last run had no failures, rather than an empty array, so a
+   * stale reason from a previous run cannot survive a clean one.
+   */
+  failures?: readonly string[];
 }
 /**
  * What the automation earned for ONE account today.
