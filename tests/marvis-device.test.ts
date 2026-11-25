@@ -9,6 +9,13 @@
  * 这里 `vi.mock('node:os')` 直接换掉 userInfo / hostname，因为要模拟的正是
  * 「平台上没有当前用户的条目」——那种环境里 userInfo() 是**抛异常**，不是返回空串。
  * `spawnSync` 也被替换，代表「此机未安装 Marvis 客户端」。
+ *
+ * **userInfo() 的桩必须是纯合成对象，绝不能调用真实的 userInfo()。**
+ *
+ * 一开始这里写的是 `{ ...actual.userInfo(), username: osState.usernameValue }` —— 看上去
+ * 只覆盖了 username，但它每次都会真的去问一次操作系统。于是在拿不到当前用户条目的机器上
+ * （实测 `uv_os_get_passwd returned ENOMEM`）三条「正常派生」用例直接失败，而失败原因与
+ * 被测逻辑毫无关系。测试的输入必须完全由测试给出：这里所有字段都是常量。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
@@ -19,14 +26,39 @@ const osState = {
   hostnameValue: 'DEV-BOX',
 }
 
+/**
+ * 合成的 `os.userInfo()` 返回值。
+ *
+ * 字段与 `node:os` 的 `UserInfo<string>` 一致（`uid/gid/username/homedir/shell`）。取值全是
+ * 常量，没有一处取自运行环境：`uid`/`gid` 用 -1 表示「平台没有这个数值」（Windows 本来就
+ * 是这样），`homedir` 是一个不可能存在的固定路径，`shell` 用 null。源码只读 `username`，
+ * 但把整份对象说清楚，才能保证「测试不碰运行环境」这件事以后不会被人改回去。
+ */
+function syntheticUserInfo(): {
+  uid: number
+  gid: number
+  username: string
+  homedir: string
+  shell: null
+} {
+  return {
+    uid: -1,
+    gid: -1,
+    username: osState.usernameValue,
+    homedir: 'C:\\Users\\synthetic-fixture',
+    shell: null,
+  }
+}
+
 vi.mock('node:os', async importOriginal => {
   const actual = await importOriginal<typeof import('node:os')>()
   return {
     ...actual,
     hostname: (): string => osState.hostnameValue,
+    // 不调用 actual.userInfo()：那一句会让每条用例都依赖运行机器的用户表。
     userInfo: (): ReturnType<typeof actual.userInfo> => {
       if (osState.userThrows) throw new Error('no entry for the current user')
-      return { ...actual.userInfo(), username: osState.usernameValue }
+      return syntheticUserInfo()
     },
   }
 })
@@ -246,6 +278,42 @@ describe('no stable input at all: a diagnosable error, not an invented id', () =
     setEnv({})
     const identity = (await fresh()).deviceIdentity()
     expect(Object.hasOwn(identity, 'guid')).toBe(false)
+  })
+})
+
+describe('the os.userInfo() fixture is synthetic, not the machine\'s own answer', () => {
+  it('every field of the stub is a constant this file controls', async () => {
+    /*
+      这条是上一轮失败的守卫。上一轮 mock 写的是 `{ ...actual.userInfo(), username }`：
+      在能读到用户信息的机器上一切正常，在拿不到用户条目的机器上
+      （`uv_os_get_passwd returned ENOMEM`）直接抛，三条「正常派生」用例全红 ——
+      而失败原因与被测逻辑毫无关系。
+
+      为什么这里断言 `homedir` 而不只断言 `username`：`username` 会被 mock 覆盖，
+      无论底下是真是假都一样；`homedir` 是**没有被覆盖的那个字段**，它来自真实的
+      `actual.userInfo()` 时必然是本机主目录（如 `C:\\Users\\YYT`），而合成值是
+      `C:\\Users\\synthetic-fixture`。于是「有没有偷偷问操作系统」这件事变成可断言的。
+    */
+    const { userInfo } = await import('node:os')
+    expect(userInfo()).toEqual({
+      uid: -1,
+      gid: -1,
+      username: 'yy tester',
+      homedir: 'C:\\Users\\synthetic-fixture',
+      shell: null,
+    })
+  })
+
+  it('deriving an id works even when the fixture is the only input available', async () => {
+    // 合成夹具必须自足：不依赖本机是否装客户端、是否有用户条目、主机名叫什么。
+    setEnv({})
+    osState.userThrows = false
+    osState.hostnameValue = 'DEV-BOX'
+    osState.usernameValue = 'yy tester'
+    const identity = (await fresh()).deviceIdentity()
+    expect(identity.ok).toBe(true)
+    if (!identity.ok) return
+    expect(identity.guid).toBe(createHash('md5').update('DEV-BOX|yy tester|marvis').digest('hex'))
   })
 })
 

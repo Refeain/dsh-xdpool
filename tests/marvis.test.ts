@@ -1,5 +1,38 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { deviceGuid, resetDeviceCache } from '../src/marvis-device.ts'
+
+/**
+ * 这条用例要的是「deviceGuid() 给出稳定的 32 hex」，而不是「这台机器上恰好能推出设备号」。
+ *
+ * 所以把两处环境输入都换成合成值：`os.userInfo()` / `os.hostname()` 给常量，
+ * `spawnSync` 返回「没装 Marvis 客户端」（否则会真的跑一次 `reg query`，最多等 3 秒，
+ * 而且结果取决于运行机器上装没装客户端）。
+ *
+ * **合成对象里不能调用真实的 `userInfo()`** —— 那会让这条用例依赖运行机器的用户表，
+ * 在没有当前用户条目的机器上直接失败。本文件其它用例不碰 os，加这个 mock 不影响它们。
+ * `vi.mock` 会被 vitest 提升到文件顶部，所以位置不影响生效顺序。
+ */
+const osFixture = { username: 'marvis-fixture', hostname: 'MARVIS-FIXTURE-BOX' }
+
+vi.mock('node:os', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:os')>()
+  return {
+    ...actual,
+    hostname: (): string => osFixture.hostname,
+    userInfo: (): ReturnType<typeof actual.userInfo> => ({
+      uid: -1,
+      gid: -1,
+      username: osFixture.username,
+      homedir: 'C:\\Users\\synthetic-fixture',
+      shell: null,
+    }),
+  }
+})
+
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawnSync: (): { status: number; stdout: string } => ({ status: 1, stdout: '' }) }
+})
 import { extractCode } from '../src/marvis-session.ts'
 import { MARVIS_MODELS, MARVIS_DEFAULT_MODEL, findMarvisModel } from '../src/marvis-models.ts'
 import { chatHeaders, marvisExt, ualSignature, uskeyOf } from '../src/marvis-protocol.ts'

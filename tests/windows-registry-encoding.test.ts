@@ -229,7 +229,7 @@ describe.skipIf(blocked !== undefined)('non-ASCII install paths survive the regi
  * is not inert debris: it shows up as an installed app on the next run, and on a
  * real machine it is a phantom entry in the user's own Add/Remove list.
  */
-describe.skipIf(blocked !== undefined)('cleanup removes only this run', () => {
+describe('fixture directories are unique per run', () => {
   it('each fixture gets its own directory', () => {
     /*
       3.2.0 用的是固定路径 `D:\_dsh_enc_probe`。两个用例（或两个并发运行）会互相删掉
@@ -250,7 +250,16 @@ describe.skipIf(blocked !== undefined)('cleanup removes only this run', () => {
       rmSync(second, { recursive: true, force: true })
     }
   }, 30_000)
+})
 
+/**
+ * 这一条要真的在 HKCU 下建两个键，所以仍然受 `blocked` 约束。
+ *
+ * 把它和上一条分开是这次复核的直接结论：上一条只用 `mkdtemp`，在任何机器上都能跑，
+ * 却因为和需要注册表的用例共用一个 describe 而被一起记为「环境未验证」。跳过项必须
+ * 真的是环境限制 —— 否则「跳过 N 项」会读起来比实际情况更无害。
+ */
+describe.skipIf(blocked !== undefined)('registry keys are unique per run', () => {
   it('two fixtures with different run suffixes do not collide', () => {
     const other = `${KEY}-other`
     const { root, exe } = fixture()
