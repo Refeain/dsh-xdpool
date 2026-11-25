@@ -11,7 +11,7 @@
  *
  * @module dsh-xdpool/version
  */
-export const POOL_VERSION = '3.2.0'
+export const POOL_VERSION = '3.3.0'
 
 /**
  * Compare two dotted versions.
