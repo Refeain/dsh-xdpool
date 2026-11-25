@@ -96,7 +96,7 @@ import {
 import { doubaoListing } from '../doubao-models.ts'
 import { REGISTERED_CHANNELS } from '../channel-roster.ts'
 import { DoubaoAutomationPane } from './DoubaoAutomationPane.tsx'
-import type { PoolDistribution, PoolWebChannel, PoolWebChannelModel } from '../status-paths.ts'
+import type { PoolDistribution, PoolWebAccount, PoolWebChannel, PoolWebChannelModel } from '../status-paths.ts'
 import type { XdPoolSettingsKey } from './locales.ts'
 
 type Translate = (key: XdPoolSettingsKey, params?: Record<string, unknown>) => string
@@ -1239,6 +1239,36 @@ async function fetchOwnSession(channel: string): Promise<
 }
 
 /**
+ * 一条 WorkBuddy lane 的账号，由插件池（不是 pack）提供。
+ *
+ * 为什么需要这个：同一条 lane 上有两套账号表 —— 插件池自己的
+ * `~/.dsh/.xdpool/accounts.json`，和 vendored channel-pack 的
+ * `account.list`。两边各存各的，条数也对不上（实测 cn 池 4 个、pack 2 个），
+ * 而详情页此前只画 pack 那份，用户看到的就是「我有 4 个账号，这里只有 2 个」。
+ *
+ * 所以这两条 lane 的账号列表、计数、签到状态统一改由插件池提供，
+ * pack 那份在这两条 lane 上不再渲染 —— 否则同一个账号会因为两边各有一行
+ * 而在页面上出现两遍。
+ *
+ * 这里只声明**数据与操作**，长相由使用方决定：账号卡仍按设计稿的
+ * `.acct / .acct-head / .acct-total / .acct-detail` 画（`AGENTS.md`：界面只有
+ * 一个来源，不得自造类名 —— 3.0.6 的 `xdp-acct*` 就是被回退的那次）。
+ */
+export interface PoolLaneBinding {
+  readonly accounts: readonly PoolWebAccount[]
+  /** 池子上一次真正服务过的账号 id（卡上的「正在使用」徽章）。 */
+  readonly activeAccountId?: string | undefined
+  /** 这一个账号的签到现在进行中。 */
+  readonly claimingId?: string | undefined
+  /** 这一个账号的某次操作在进行中。 */
+  readonly busyId?: string | undefined
+  readonly onClaim: (accountId: string) => void
+  readonly onToggle: (accountId: string, disabled: boolean) => void
+  readonly onPrefer: (accountId: string | null) => void
+  readonly onIgnore: (accountId: string) => void
+}
+
+/**
  * 渠道详情。
  *
  * 设计稿的右栏是「选中那一个渠道的详情」：一个标题、三格统计、它的账号、
@@ -1251,7 +1281,7 @@ async function fetchOwnSession(channel: string): Promise<
  * `active` 为空时（首次进入、或选中的渠道被移除）退回第一家，这样右栏
  * 永远不会是空的。
  */
-export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoClaimBusy, onAutoClaim, autoClaimRunning, onAutoClaimRun, autoClaimReport, autoClaimFailing, autoClaimEarned, banner, regionCards }: {
+export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoClaimBusy, onAutoClaim, autoClaimRunning, onAutoClaimRun, autoClaimReport, autoClaimFailing, autoClaimEarned, banner, poolLanes }: {
   readonly t?: Translate | undefined
   /** 中栏选中的渠道 id；空则显示第一家。 */
   readonly active?: string | undefined
@@ -1290,13 +1320,13 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   /** 外层的提示条，放进详情列 mbody 顶部（不能落在 .app 网格里）。 */
   readonly banner?: ReactNode | undefined
   /**
-   * 外层的插件池账号卡，和 banner 一样进详情列 mbody。
+   * 插件池账号，按渠道 id 索引（`buddy` / `workbuddy`）。
    *
-   * 这一页是 .app 的三列网格（rail | 渠道列表 | 详情），detail 列之外没有第四格。
-   * 多出来的内容挂在 .app 层都会自己占一格，把 list 和 main 顶到第二行，
-   * 而 .app 是 height:100vh + overflow:hidden —— 第二行直接被裁掉。
+   * 给了哪条 lane，那条 lane 的账号列表、计数与签到状态就整段改用这里的账号，
+   * pack 的 `account.list` 在它上面不再渲染 —— 两套表各画一遍会让同一个账号
+   * 出现两次，而它们本来就不一样长。
    */
-  readonly regionCards?: ReactNode | undefined
+  readonly poolLanes?: Readonly<Record<string, PoolLaneBinding>> | undefined
 }): ReactElement {
   /*
     选中哪一家。外部传了就用外部的（中栏在别的组件里时），
@@ -2523,25 +2553,17 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   // only a successful read that found nothing stays silent.
   if (entries.length === 0 && error === undefined) {
     /*
-      一条渠道都没读到，但插件池账号卡（regionCards）不属于任何渠道：
-      账号可能已经存好了、只是渠道还没扫出来，这种情况不能返回空。
-
-      所以这里留一个出口，让「有卡且已读完」的情况落到下面
-      chosenEntry === undefined 那条分支 —— 它本来就渲染 {list} + main > mbody，
-      列表头显示 0 / 0 / —，读起来是「确实没有渠道」而不是一片空白，
-      而不是另写一套 list + main。那条分支在 error 存在时本来就一直在走，是既有代码。
+      一条渠道都没读到就是「确实没有渠道」：详情页的每一块都以 chosenEntry 为前提，
+      没有渠道就没有详情可画 —— 静默返回空比画一套 0 / 0 / — 的空壳更诚实。
     */
-    const keepForRegionCards = regionCards !== undefined && !loading
-    if (!keepForRegionCards) {
-      if (!loading) return <></>
-      return (
-        <section className="dsm-xdpool-cpool" aria-label={t?.('channelpool.title') ?? 'Channels'}>
-          <p className="note" role="status">
-            {t?.('channelpool.loading') ?? 'Reading scan channels…'}
-          </p>
-        </section>
-      )
-    }
+    if (!loading) return <></>
+    return (
+      <section className="dsm-xdpool-cpool" aria-label={t?.('channelpool.title') ?? 'Channels'}>
+        <p className="note" role="status">
+          {t?.('channelpool.loading') ?? 'Reading scan channels…'}
+        </p>
+      </section>
+    )
   }
   /*
     ---------------------------------------------------------------
@@ -2558,10 +2580,21 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   */
   const chosenEntry = entries.find(entry => entry.channel.id === chosen) ?? entries[0]
 
+  /*
+    这两条 lane 的账号来自插件池而不是 pack —— 见 {@link PoolLaneBinding}。
+    计数、分组、行上的数字必须跟着同一份表走，否则左边写 4、右边画 2。
+  */
+  const laneOf = (channelId: string): PoolLaneBinding | undefined => poolLanes?.[channelId]
+  const rowAccountCount = (entry: ChannelEntry): number =>
+    laneOf(entry.channel.id)?.accounts.length ?? entry.accounts.length
+  const rowEnabledCount = (entry: ChannelEntry): number => {
+    const lane = laneOf(entry.channel.id)
+    if (lane !== undefined) return lane.accounts.filter(account => account.disabled !== true).length
+    return entry.accounts.filter(account => account.enabled !== false).length
+  }
   /* 中栏三格：账号总数 / 已连（启用中的账号）/ 积分（只加「积分」单位的渠道，美元、token、百分比不混进来） */
-  const totalAccounts = entries.reduce((sum, entry) => sum + entry.accounts.length, 0)
-  const liveAccounts = entries.reduce(
-    (sum, entry) => sum + entry.accounts.filter(account => account.enabled !== false).length, 0)
+  const totalAccounts = entries.reduce((sum, entry) => sum + rowAccountCount(entry), 0)
+  const liveAccounts = entries.reduce((sum, entry) => sum + rowEnabledCount(entry), 0)
   const totalCredits = entries.reduce((sum, entry) => {
     const credits = entry.channel.credits
     if (credits === undefined || credits.unit !== undefined || credits.quota === true) return sum
@@ -2571,8 +2604,8 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   const anyCredits = entries.some(entry => entry.channel.credits !== undefined
     && entry.channel.credits.unit === undefined && entry.channel.credits.quota !== true
     && balancesTotal(entry.balances) !== undefined)
-  const bound = entries.filter(entry => entry.accounts.length > 0)
-  const unbound = entries.filter(entry => entry.accounts.length === 0)
+  const bound = entries.filter(entry => rowAccountCount(entry) > 0)
+  const unbound = entries.filter(entry => rowAccountCount(entry) === 0)
 
   /** 中栏一行。未登录的那组去色，点了直接去登录通道（设计稿 href="login.html"）。 */
   const channelRow = (entry: ChannelEntry, isBound: boolean): ReactElement => {
@@ -2598,7 +2631,7 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
               backgroundImage: icon.startsWith('css:') ? `var(${icon.slice(4)})` : `url("${icon}")`,
             }} />}
         <span className="ch-name">{entry.channel.name}</span>
-        {isBound ? <span className="ch-n num">{String(entry.accounts.length)}</span> : null}
+        {isBound ? <span className="ch-n num">{String(rowAccountCount(entry))}</span> : null}
       </button>
     )
   }
@@ -2652,7 +2685,6 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
         <main className="main dsm-xdpool-cpool dsm-xdpool-regions" aria-label={t?.('channelpool.title') ?? 'Channels'}>
           <div className="mbody" style={{ paddingTop: 'var(--s5)' }}>
             {banner}
-            {regionCards}
             {error === undefined ? null : (
               <p className="hint">
                 {t?.('channelpool.loadError', { message: error }) ?? `Could not load channels: ${error}`}
@@ -2684,12 +2716,38 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   const balanceOf = (accountId: string): ChannelBalance | undefined =>
     balances.find(row => row.accountId === accountId)
   const enabledAccounts = accounts.filter(account => account.enabled !== false)
+  /*
+    lane 存在时（WorkBuddy 国内版 / 国际版），这一页的每一个计数都改读插件池：
+    账号数、启用数、今日已领。pack 那份只在这两条 lane 上让位，
+    其它渠道完全走原路 —— 它们没有插件池账号，lane 是 undefined。
+  */
+  const lane = laneOf(channel.id)
+  /*
+    池的 `expiresAt` 是 ISO 字符串（pack 那边是 epoch ms），而 expiryText 只认 ms。
+    单独包一层，免得在两处各写一遍 Date.parse。
+  */
+  const poolExpiry = (iso: string | undefined): string | undefined => {
+    if (iso === undefined) return undefined
+    const at = Date.parse(iso)
+    return Number.isFinite(at) ? expiryText(at, t) : undefined
+  }
+  const laneEnabled = lane === undefined
+    ? undefined
+    : lane.accounts.filter(account => account.disabled !== true)
+  const shownAccounts = lane?.accounts.length ?? accounts.length
+  const shownEnabled = laneEnabled?.length ?? enabledAccounts.length
+  /*
+    签到状态：pack 的账号查 statuses，池的账号直接看自己的 checkin 字段
+    （两者本来同源 —— web-status.ts 现查 fetchCheckinStatus，不是缓存）。
+  */
+  const checkedInToday = laneEnabled === undefined
+    ? enabledAccounts.filter(account => statusOf(account.id)?.todayCheckedIn === true).length
+    : laneEnabled.filter(account => account.checkin?.todayCheckedIn === true).length
   // An unknown status is treated as "not yet" so the button stays claimable
   // until the first refresh lands; a zero-account channel never reads as
   // "all claimed", because there is nothing to have claimed.
-  const allClaimedToday = enabledAccounts.length > 0
-    && enabledAccounts.every(account => statusOf(account.id)?.todayCheckedIn === true)
-  const claimedToday = enabledAccounts.filter(account => statusOf(account.id)?.todayCheckedIn === true).length
+  const allClaimedToday = shownEnabled > 0 && checkedInToday === shownEnabled
+  const claimedToday = checkedInToday
   /* 有签到路径的渠道才画「全部领取」：pack 的 credits.claimAll，或插件自己的签到路由 */
   const canClaim = channel.credits?.claim === true || OWN_CHECKIN_CHANNELS[channel.id] !== undefined
   const query = queryFor(channel.id)
@@ -2769,7 +2827,7 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
           <span className="mhead-org">
             {channel.domain === undefined || channel.domain === '' ? channel.org : `${channel.org} · ${channel.domain}`}
           </span>
-          {accounts.length > 0
+          {shownAccounts > 0
             ? <span className="pill" data-tone="ok">{t?.('channelpool.stateReady') ?? '已连接'}</span>
             : <span className="pill">{t?.('channelpool.stateNone') ?? '未登录'}</span>}
         </div>
@@ -2801,7 +2859,6 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
 
       <div className="mbody">
         {banner}
-        {regionCards}
         {/*
           就地登录的状态条。
           因为不再跳页，读者需要在这一页看到「窗口已经开了 / 还在等 / 失败了为什么」。
@@ -2915,7 +2972,7 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
         }}>
           <div className="kpi">
             <span className="kpi-k">{t?.('channelpool.statAccounts') ?? '账号'}</span>
-            <span className="kpi-v num">{String(enabledAccounts.length)}</span>
+            <span className="kpi-v num">{String(shownEnabled)}</span>
           </div>
           <div className="kpi">
             <span className="kpi-k">{t?.('channelpool.statModels') ?? '模型'}</span>
@@ -2958,7 +3015,7 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
               ))}
             </div>
             <span className="policy-hint">
-              {accounts.length <= 1
+              {shownAccounts <= 1
                 ? '这个渠道只有一个账号，使用方式不影响选号。'
                 : modeHint(t, mode)}
             </span>
@@ -2977,7 +3034,7 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
                   onClick={() => { onAutoClaim?.(autoClaim !== true) }}
                 />
                 <span>
-                  {`${t?.('channelpool.claimedToday') ?? '今日已领'} ${String(claimedToday)}/${String(enabledAccounts.length)}`}
+                  {`${t?.('channelpool.claimedToday') ?? '今日已领'} ${String(claimedToday)}/${String(shownEnabled)}`}
                 </span>
                 {/*
                   「立即执行」—— 自动化开着只是「到点会跑」，用户想马上领的时候没有入口。
@@ -3114,7 +3171,7 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
         <section className="sec">
           <div className="sec-head">
             <span className="sec-title">{t?.('channelpool.accountsTitle') ?? '账号'}</span>
-            <span className="sec-n num">{String(accounts.length)}</span>
+            <span className="sec-n num">{String(shownAccounts)}</span>
             <span className="sec-actions">
               <button type="button" className="btn" disabled={isBusy}
                 onClick={() => { void recheck(channel.id) }}>
@@ -3143,7 +3200,124 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
           {chosenEntry.balanceError === undefined ? null : (
             <p className="hint" role="status">{chosenEntry.balanceError}</p>
           )}
-          {accounts.length === 0 ? (
+          {lane === undefined ? null : (
+            <div className="accts">
+              {lane.accounts.map(account => {
+                /*
+                  WorkBuddy 两条 lane 的账号来自插件池。长相必须和左边保持一致的
+                  `.acct`（设计稿类名），不能另起一套 —— 见 PoolLaneBinding 的说明。
+                */
+                const credits = account.credits
+                const checkin = account.checkin
+                const claimed = checkin?.todayCheckedIn === true
+                const claiming = lane.claimingId === account.id
+                const busy = lane.busyId === account.id
+                const soon = poolExpiry(account.expiresAt)
+                const packages = credits?.packages ?? []
+                return (
+                  <article key={account.id} className="acct" data-off={account.disabled}>
+                    <div className="acct-head">
+                      <span className="acct-dot" aria-hidden="true"
+                        style={account.disabled ? { background: 'var(--line-3)' } : undefined} />
+                      <span className="acct-name"
+                        title={account.nickname === undefined ? account.label : `${account.label}（${account.nickname}）`}>
+                        {account.label}
+                      </span>
+                      {lane.activeAccountId === account.id
+                        ? <span className="pill" data-tone="ok">{t?.('row.currentAccount') ?? '当前使用'}</span>
+                        : null}
+                      {account.disabled ? <span className="pill">{'已停用'}</span> : null}
+                      {account.cooling ? <span className="pill" data-tone="warn">{'冷却中'}</span> : null}
+                      <button
+                        type="button"
+                        role="switch"
+                        className="sw"
+                        aria-checked={!account.disabled}
+                        aria-label={account.label}
+                        disabled={busy}
+                        onClick={() => { lane.onToggle(account.id, !account.disabled) }}
+                      />
+                    </div>
+                    <div className="acct-total" style={account.creditsError !== undefined ? { flexWrap: 'wrap', alignItems: 'flex-start' } : undefined}>
+                      {account.creditsError !== undefined
+                        ? <span className="acct-k" data-tone="err" title={account.creditsError}
+                            style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                              overflow: 'hidden', color: 'var(--warn)', lineHeight: 1.5, minWidth: 0, flex: '1 1 auto' }}>
+                            {'积分读取失败'}
+                          </span>
+                        : credits?.total !== undefined
+                          ? <>
+                              <span className="acct-total-v num">{amount(credits.total)}</span>
+                              <span className="acct-total-u">{unit}</span>
+                            </>
+                          : <span className="acct-total-v">{'…'}</span>}
+                      {soon === undefined ? null : <span className="acct-soon">{soon}</span>}
+                    </div>
+                    <details className="acct-detail">
+                      <summary>{t?.('channelpool.accountDetail') ?? '积分明细'}</summary>
+                      <dl className="facts">
+                        {packages.length === 0 ? null : packages.map((pkg, index) => (
+                          <div className="fact" key={`${pkg.packageName}-${String(index)}`}>
+                            <dt>{pkg.packageName}</dt>
+                            <dd>
+                              {pkg.size === undefined
+                                ? (pkg.remain === undefined ? '—' : amount(pkg.remain))
+                                : `${amount(pkg.remain ?? 0)} / ${amount(pkg.size)}`}
+                            </dd>
+                          </div>
+                        ))}
+                        {checkin === undefined ? null : (
+                          <div className="fact">
+                            <dt>{t?.('channelpool.todayClaimed') ?? '今日签到'}</dt>
+                            {claimed
+                              ? <dd style={{ color: 'var(--accent)' }}>
+                                  {'已领'}{typeof checkin?.todayCredit === 'number' ? ` +${amount(checkin.todayCredit)}` : ''}
+                                </dd>
+                              : <dd>{t?.('channelpool.notClaimed') ?? '未领'}</dd>}
+                          </div>
+                        )}
+                        {checkin === undefined || checkin.streakDays <= 0 ? null : (
+                          <div className="fact">
+                            <dt>{'连续签到'}</dt>
+                            <dd>{`${String(checkin.streakDays)} 天`}</dd>
+                          </div>
+                        )}
+                      </dl>
+                      <div className="acct-more">
+                        {checkin === undefined ? null : (
+                          <button type="button" className="tiny"
+                            disabled={busy || claiming || claimed || checkin.active !== true}
+                            title={checkin.active === true ? undefined : '这个账号当前没有签到活动'}
+                            onClick={() => { lane.onClaim(account.id) }}>
+                            {claimed
+                              ? (t?.('channelpool.claimClaimed') ?? '今日已领取')
+                              : claiming
+                                ? (t?.('channelpool.claiming') ?? '领取中…')
+                                : '签到'}
+                          </button>
+                        )}
+                        <button type="button" className="tiny"
+                          disabled={busy || account.preferred}
+                          title={t?.('channelpool.preferHint') ?? '优先用这个账号接下一次请求'}
+                          onClick={() => { lane.onPrefer(account.preferred ? null : account.id) }}>
+                          {account.preferred
+                            ? (t?.('channelpool.preferred') ?? '首选')
+                            : (t?.('channelpool.prefer') ?? '设为首选')}
+                        </button>
+                        <button type="button" className="tiny" disabled={busy}
+                          style={{ color: 'var(--danger)' }}
+                          title={'把这个账号从池子里永久移除（可在「已忽略」里恢复）'}
+                          onClick={() => { lane.onIgnore(account.id) }}>
+                          {'移出池子'}
+                        </button>
+                      </div>
+                    </details>
+                  </article>
+                )
+              })}
+            </div>
+          )}
+          {lane !== undefined ? null : accounts.length === 0 ? (
             <p className="hint">
               {t?.('channelpool.accountsEmpty') ?? '这个渠道还没有登录的账号。'}
             </p>
