@@ -69,6 +69,7 @@ import { ChannelPoolSection } from './ChannelPoolSection.tsx'
 import { BackupPanel } from './BackupPanel.tsx'
 import { POOL_VERSION } from '../version.ts'
 import type { XdPoolSettingsKey } from './locales.ts'
+import { dayKeyOf, earnedNothing, earnedToday } from './earned-today.ts'
 /** Localized copy injected by the browser-plugin registration. */
 export interface PoolCardInjected {
   t: (key: XdPoolSettingsKey, params?: Record<string, unknown>) => string
@@ -203,18 +204,6 @@ function automationJobs(status: PoolWebStatus | undefined): PoolWebAutomationJob
  */
 const FAILURE_LINES_SHOWN = 2
 /**
- * The failure lines from the most recent run that had any, as one sentence.
- *
- * `undefined` when nothing failed — which is what keeps the panel's warning row
- * absent rather than present-and-empty. When several accounts failed the lines
- * are joined with a middle dot: they are peers, not a hierarchy, and a full
- * stop would read as a paragraph. The list is already redacted and already
- * carries each account's masked label, so no scrubbing happens here.
- *
- * Past `FAILURE_LINES_SHOWN` the remainder collapses to `+N`: the count still
- * says how widespread the failure is without reproducing every message.
- */
-/**
  * Today's total take from the automation, as one line.
  *
  * `undefined` when nothing has been earned yet -- the panel then shows only the
@@ -222,44 +211,33 @@ const FAILURE_LINES_SHOWN = 2
  * nobody made: "the automation got 0" reads as a failure, while "it has not run
  * yet" is the honest answer, and the absent row says that.
  *
- * Summed across all six passes because the user's question is "how much did I
- * get today", not "which pass paid". The per-source breakdown stays in the data
- * (`checkinCredit` / `travelCredit` / ...) for anything that wants it.
- *
- * Every entry carries its own `date`; rows dated before today are skipped rather
- * than summed. A persisted ledger can hold them -- the scheduler now drops them
- * on restore, but a document written by an older build is still on disk, and
- * summing it would report last week's credits as today's.
+ * The sum itself lives in `earned-today.ts`, where its two sources (live
+ * check-in status vs the automation's own ledger) and why they must not be
+ * confused are documented and tested. This function only decides the wording.
  */
 function automationEarnedToday(
   status: PoolWebStatus | undefined,
   t?: PoolCardProps['t'],
 ): string | undefined {
-  const today = status?.automation?.earningsToday
-  if (today === undefined) return undefined
-  let credit = 0
-  let energy = 0
-  let claimed = 0
-  let sawToday = false
-  for (const entry of Object.values(today)) {
-    if (entry.date !== dayKeyOfToday()) continue
-    sawToday = true
-    credit += entry.credit + entry.checkinCredit + entry.bonusCredit
-      + entry.travelCredit + entry.compensationCredit
-    energy += entry.energy
-    claimed += entry.claimed
+  const totals = earnedToday(status, dayKeyOf(new Date()))
+  if (earnedNothing(totals)) return undefined
+  /*
+   * Only the parts that actually came in.
+   *
+   * On a normal day the automation collects check-ins and nothing else, so the
+   * full sentence read "400 credits · 0 energy · 0 task(s)" -- two zeroes that
+   * invite the reader to wonder what went wrong with the parts that pay nothing
+   * most days. A credits-only day gets a credits-only line.
+   */
+  if (totals.energy === 0 && totals.claimed === 0) {
+    return t?.('channelpool.autoEarnedCredits', { credit: totals.credit })
+      ?? `${String(totals.credit)} credits`
   }
-  if (!sawToday) return undefined
-  if (credit === 0 && energy === 0 && claimed === 0) return undefined
-  return t?.('channelpool.autoEarned', { credit, energy, count: claimed })
-    ?? `${String(credit)} credits · ${String(energy)} energy · ${String(claimed)} task(s)`
-}
-/** Local calendar day, matching the `YYYY-MM-DD` keys the scheduler writes. */
-function dayKeyOfToday(): string {
-  const now = new Date()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  return `${String(now.getFullYear())}-${month}-${day}`
+  return t?.('channelpool.autoEarned', {
+    credit: totals.credit,
+    energy: totals.energy,
+    count: totals.claimed,
+  }) ?? `${String(totals.credit)} credits · ${String(totals.energy)} energy · ${String(totals.claimed)} task(s)`
 }
 function automationFailures(status: PoolWebStatus | undefined): string | undefined {
   const lines = automationJobs(status)
