@@ -97,6 +97,15 @@ import { doubaoListing } from '../doubao-models.ts'
 import { REGISTERED_CHANNELS } from '../channel-roster.ts'
 import { DoubaoAutomationPane } from './DoubaoAutomationPane.tsx'
 import type { PoolDistribution, PoolWebAccount, PoolWebChannel, PoolWebChannelModel } from '../status-paths.ts'
+import { balanceDisplay, buildPageView, poolRegionOf, type AccountRow, type AccountView } from './account-view.ts'
+import type { IgnoredEntry } from './ignored-restore.ts'
+import {
+  claimRouteFor,
+  summarizeBatch,
+  type PoolActionResult,
+  type PoolBatchReport,
+  type RescanOutcome,
+} from './pool-actions.ts'
 import type { XdPoolSettingsKey } from './locales.ts'
 
 type Translate = (key: XdPoolSettingsKey, params?: Record<string, unknown>) => string
@@ -433,6 +442,14 @@ interface ChannelEntry {
   balances: readonly ChannelBalance[]
   /** Today's check-in state, when the pack reports one. */
   statuses: readonly ChannelCreditStatus[]
+  /**
+   * Why `credits.status` could not answer, in the pack's words.
+   *
+   * 交接文档 4.4：「RPC 失败的外层状态也必须传到视图」。3.2.0 的 `statuses` 永远是
+   * 空数组（`credits.status` 从来没被调用过），所以"没读到"和"今天没签"在界面上
+   * 长得一模一样。分开记录之后，视图才能把"问不到"标成未知而不是未签。
+   */
+  statusError?: string | undefined
   /** True while the first balance read is in flight. */
   balancePending: boolean
   /** Why the balance read failed, in the pack's words. */
@@ -1262,10 +1279,54 @@ export interface PoolLaneBinding {
   readonly claimingId?: string | undefined
   /** 这一个账号的某次操作在进行中。 */
   readonly busyId?: string | undefined
+  /** 整条 lane 的批量动作在进行中（「全部领取」/「重新检测」）。 */
+  readonly batchBusy?: boolean | undefined
   readonly onClaim: (accountId: string) => void
   readonly onToggle: (accountId: string, disabled: boolean) => void
   readonly onPrefer: (accountId: string | null) => void
   readonly onIgnore: (accountId: string) => void
+  /**
+   * 已移出池子的账号 —— 全池数据，两个区看到的是同一份。
+   *
+   * 这一格回答的是「我按了移出，现在它在哪儿」。3.2.0 有 `status.ignored`、
+   * 有四个 locale 键、有一整段 CSS（`.dsm-xdpool-ignored*`），但客户端从来没读过
+   * 那个字段 —— 于是「移出」在界面上是一扇单向门，只能靠手改 JSON 才回得来（F6）。
+   */
+  readonly ignored?: readonly IgnoredEntry[] | undefined
+  /** 把一个被移出的账号放回池子。 */
+  readonly onRestore?: ((entry: IgnoredEntry) => void) | undefined
+  /**
+   * 可等待的动作服务。
+   *
+   * 单号按钮与批量按钮共用它 —— 交接文档 4.3 明确要求「避免将已吞掉异常、
+   * 只返回 void 的按钮包装直接作为批量服务」：那种包装对批量毫无用处，
+   * 因为它既说不出哪个账号失败了，也不告诉你什么时候结束。
+   *
+   * `onClaim` 那套保留给单个按钮（它还要管按钮自己的忙碌态与提示条），
+   * 但两者最终调用的是同一个函数。
+   */
+  readonly actions?: PoolLaneActions | undefined
+}
+
+/** 池动作服务：每一格都能 await，且都不吞掉失败。 */
+export interface PoolLaneActions {
+  /** 单号签到。失败是返回值的一部分（`outcome: 'failed'`），不是异常。 */
+  readonly claim: (accountId: string) => Promise<PoolActionResult>
+  /** 批量签到：先复查未知、按序提交、最后统一回读。 */
+  readonly claimAll: () => Promise<PoolBatchReport>
+  /** 单号状态复查，供批量前的「未知先重查」。 */
+  readonly recheckAccount: (accountId: string) => Promise<AccountRow | undefined>
+  /**
+   * 一次全池 rescan，完成后读两个区域。
+   *
+   * 返回 `total`（全池数，rescan 自己报的）与 `byRegion`（各区快照里的数量）。
+   * 界面要显示"这一区几个"时必须读后者 —— 前者是全池。
+   */
+  readonly rescan: () => Promise<RescanOutcome>
+  /** 当前这一区最新的账号行（与详情页画的是同一份投影）。 */
+  readonly rows: () => readonly AccountRow[]
+  /** 读一次这一区的最新状态（批量收尾后的统一回读也走它）。 */
+  readonly refresh: () => Promise<{ readonly ok: boolean; readonly error?: string | undefined }>
 }
 
 /**
@@ -1643,6 +1704,7 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
             // was unreachable dead code and the wait was invisible.
             balances: [] as readonly ChannelBalance[],
             statuses: [] as readonly ChannelCreditStatus[],
+            statusError: undefined,
             balancePending: wantBalances,
             balanceError: undefined,
             modelError: modelEmptyBecauseRefused
@@ -1669,6 +1731,7 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
         facts: new Map<string, PoolWebChannelModel>(),
         balances: [] as readonly ChannelBalance[],
         statuses: [] as readonly ChannelCreditStatus[],
+        statusError: undefined,
         balancePending: false,
         balanceError: undefined as string | undefined,
         modelError: undefined as string | undefined,
@@ -1791,6 +1854,11 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
       for (const entry of next) {
         if (entry.channel.credits === undefined) continue
         void refreshBalances(entry.channel.id, false, true, seq)
+        /*
+          签到状态与余额是两次独立的读，一起发但不互相等待：只有声明了
+          `credits.status` 的渠道才会真的发请求（见 refreshStatuses）。
+        */
+        void refreshStatuses(entry.channel.id, true)
       }
 
       const idsByProvider: Record<string, readonly string[]> = {}
@@ -2073,6 +2141,39 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
    * cannot overwrite a newer card, which is what the previous version got wrong
    * when a remount overlapped an in-flight refresh.
    */
+  /**
+   * 读一个渠道的签到状态（`credits.status`）。
+   *
+   * 3.2.0 里这个方法从来没被调用过：`ChannelEntry.statuses` 在每一处构造点都写作
+   * `[]`，于是「今日已领 0/3」「今天没签」和「根本没问到」在界面上完全一样。
+   * 交接文档 4.4 要求按渠道能力读取、领取后回读，并把 RPC 失败的外层状态传到视图。
+   *
+   * 只有 `credits.status === true` 的渠道才问：其余渠道的 pack 后端没有这个端点，
+   * 问过去只会拿到 "unsupported provider"，那种错误没有信息量。
+   */
+  const refreshStatuses = async (provider: string, quiet = false): Promise<void> => {
+    const capability = entriesRef.current.find(entry => entry.channel.id === provider)?.channel.credits
+    if (capability?.status !== true) return
+    if (!quiet) markBusy(provider, true)
+    try {
+      const envelope = await callPack('credits.status', { provider })
+      if (!mountedRef.current) return
+      if (!envelope.ok) {
+        const message = envelope.error?.message ?? 'credits.status refused'
+        setEntries(previous => previous.map(entry =>
+          entry.channel.id === provider ? { ...entry, statusError: message } : entry))
+        return
+      }
+      const rows = creditStatusesFrom(envelope)
+      setEntries(previous => previous.map(entry =>
+        entry.channel.id === provider
+          ? { ...entry, statuses: rows, statusError: undefined }
+          : entry))
+    } finally {
+      if (mountedRef.current && !quiet) markBusy(provider, false)
+    }
+  }
+
   const refreshBalances = async (provider: string, force: boolean, quiet = false, seq?: number): Promise<void> => {
     if (!quiet) markBusy(provider, true)
     setEntries(previous => previous.map(entry =>
@@ -2196,7 +2297,12 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
       if (result?.failed !== undefined && result.failed > 0) {
         setNotice(t?.('channelpool.claimFailed', { failed: result.failed }) ?? `${result.failed} failed.`)
       }
+      /*
+        交接文档 4.4：「领取后重新读取本渠道状态和余额」。
+        只回读余额会让「今日已领」停在领取前的数字 —— 领到了、余额涨了、已领数没动。
+      */
       await refreshBalances(provider, true)
+      await refreshStatuses(provider)
     } finally {
       if (mountedRef.current) markBusy(provider, false)
     }
@@ -2585,25 +2691,56 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
     计数、分组、行上的数字必须跟着同一份表走，否则左边写 4、右边画 2。
   */
   const laneOf = (channelId: string): PoolLaneBinding | undefined => poolLanes?.[channelId]
-  const rowAccountCount = (entry: ChannelEntry): number =>
-    laneOf(entry.channel.id)?.accounts.length ?? entry.accounts.length
-  const rowEnabledCount = (entry: ChannelEntry): number => {
-    const lane = laneOf(entry.channel.id)
-    if (lane !== undefined) return lane.accounts.filter(account => account.disabled !== true).length
-    return entry.accounts.filter(account => account.enabled !== false).length
-  }
+  /*
+    中栏那三格也走同一个投影。
+
+    它们以前各算一遍：账号数读 lane（对），积分却读 pack 的 balances（错 —— 国内 lane 上
+    pack 只有两个账号）。于是中栏的「积分」与右栏详情的「剩余积分」可以同时显示两个不同的
+    数字，而两个都是"算出来的"。现在两边都从 buildPageView 取，不可能再分叉。
+  */
+  const rowView = (entry: ChannelEntry): AccountView => buildPageView({
+    channel: entry.channel,
+    laneAccounts: laneOf(entry.channel.id)?.accounts,
+    /*
+      中栏只需要计数与合计，用不到行；但 pack 快照仍要传，否则第三方渠道会得到空视图。
+      池来源下这份数据会被 buildPageView 直接忽略。
+    */
+    pack: {
+      accounts: entry.accounts,
+      balances: entry.balances.map(row => ({
+        accountId: row.accountId,
+        balance: balanceAmount(row.balance),
+        error: row.error,
+      })),
+      statuses: entry.statuses,
+      statusError: entry.statusError,
+    },
+    state: 'ready',
+  })
+  const rowAccountCount = (entry: ChannelEntry): number => rowView(entry).total
+  const rowEnabledCount = (entry: ChannelEntry): number => rowView(entry).enabled
   /* 中栏三格：账号总数 / 已连（启用中的账号）/ 积分（只加「积分」单位的渠道，美元、token、百分比不混进来） */
   const totalAccounts = entries.reduce((sum, entry) => sum + rowAccountCount(entry), 0)
   const liveAccounts = entries.reduce((sum, entry) => sum + rowEnabledCount(entry), 0)
-  const totalCredits = entries.reduce((sum, entry) => {
+  /*
+    合计只算**已知**部分，并且只在"这一家确实能报出余额"时才累加。
+
+    池来源下每家报自己的已知小计；它们各自的覆盖情况在详情页里说，中栏不重复。
+  */
+  const creditTotalOf = (entry: ChannelEntry): number | undefined => {
     const credits = entry.channel.credits
-    if (credits === undefined || credits.unit !== undefined || credits.quota === true) return sum
+    if (credits !== undefined && (credits.unit !== undefined || credits.quota === true)) return undefined
+    const view = rowView(entry)
+    if (view.source.kind === 'pool') return view.balance.measured === 0 ? undefined : view.balance.known
+    if (credits === undefined) return undefined
     const value = balancesTotal(entry.balances)
+    return value
+  }
+  const totalCredits = entries.reduce((sum, entry) => {
+    const value = creditTotalOf(entry)
     return value === undefined ? sum : sum + value
   }, 0)
-  const anyCredits = entries.some(entry => entry.channel.credits !== undefined
-    && entry.channel.credits.unit === undefined && entry.channel.credits.quota !== true
-    && balancesTotal(entry.balances) !== undefined)
+  const anyCredits = entries.some(entry => creditTotalOf(entry) !== undefined)
   const bound = entries.filter(entry => rowAccountCount(entry) > 0)
   const unbound = entries.filter(entry => rowAccountCount(entry) === 0)
 
@@ -2702,14 +2839,13 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
 
   const { channel, accounts, models, facts, balances, statuses, status } = chosenEntry
   const enabledIds = enabledFor(channel.id, models)
-  const isBusy = busy.has(channel.id)
+  /*
+    忙碌判据合并两处：本组件的 markBusy（pack 动作）与 lane 的 batchBusy（池批量）。
+    池批量跑在 PoolCard 里，本组件看不见它的 state，所以由 lane 带下来 ——
+    否则批量跑的十几秒里按钮还是可点的，用户点第二下就会重复提交。
+  */
+  const isBusy = busy.has(channel.id) || laneOf(channel.id)?.batchBusy === true
   const unit = creditUnitLabel(channel, t)
-  const chosenBalanceTotal = channel.credits === undefined ? undefined : balancesTotal(balances)
-  const chosenCredit = chosenEntry.balancePending && chosenBalanceTotal === undefined
-    ? (t?.('channelpool.balanceLoading') ?? '…')
-    : chosenBalanceTotal === undefined
-      ? '—'
-      : amount(chosenBalanceTotal)
   const modelsEnabled = models.filter(model => enabledIds.has(model.id)).length
   const statusOf = (accountId: string): ChannelCreditStatus | undefined =>
     statuses.find(row => row.accountId === accountId)
@@ -2717,11 +2853,34 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
     balances.find(row => row.accountId === accountId)
   const enabledAccounts = accounts.filter(account => account.enabled !== false)
   /*
-    lane 存在时（WorkBuddy 国内版 / 国际版），这一页的每一个计数都改读插件池：
-    账号数、启用数、今日已领。pack 那份只在这两条 lane 上让位，
-    其它渠道完全走原路 —— 它们没有插件池账号，lane 是 undefined。
+    lane 存在时（WorkBuddy 国内版 / 国际版），这一页的每一个数字都从插件池投影出来。
+    为什么不是"账号读池、余额读 pack"：那是 3.2.0 的原样，也是 900 那个数字的来路 ——
+    池里 4 个账号、pack 里 2 个，两边各自都对，合起来就是错的。
+
+    所以这里先定"读哪一份"（resolveAccountSource），再从那一份投影出整页的账号、余额、
+    签到。一个视图只读一份源，混不了。见 account-view.ts。
   */
   const lane = laneOf(channel.id)
+  const view = buildPageView({
+    channel,
+    laneAccounts: lane?.accounts,
+    pack: {
+      accounts,
+      balances: balances.map(row => ({
+        accountId: row.accountId,
+        balance: balanceAmount(row.balance),
+        error: row.error,
+      })),
+      statuses,
+      statusError: chosenEntry.statusError,
+    },
+    packError: chosenEntry.balanceError,
+    /*
+      池来源下 lane 还没到就是加载中，其余情况这一页的数据是就绪的：pack 那份是一次性读回来
+      的，池那份由 PoolCard 轮询维护。
+    */
+    state: 'ready',
+  })
   /*
     池的 `expiresAt` 是 ISO 字符串（pack 那边是 epoch ms），而 expiryText 只认 ms。
     单独包一层，免得在两处各写一遍 Date.parse。
@@ -2734,19 +2893,37 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   const laneEnabled = lane === undefined
     ? undefined
     : lane.accounts.filter(account => account.disabled !== true)
-  const shownAccounts = lane?.accounts.length ?? accounts.length
-  const shownEnabled = laneEnabled?.length ?? enabledAccounts.length
   /*
-    签到状态：pack 的账号查 statuses，池的账号直接看自己的 checkin 字段
-    （两者本来同源 —— web-status.ts 现查 fetchCheckinStatus，不是缓存）。
+    账号数与启用数是两个数字，不是一个。
+
+    设计稿的 KPI 只有一格「账号」，3.2.0 往里塞的是**启用数** —— 于是国内池 4 个账号
+    （1 个停用）显示成「账号 3」，而下面的列表列了 4 行。用户只能理解成"少了一个账号"。
+    现在那一格显示总行数，启用数作为副标题写在同一格里。
   */
-  const checkedInToday = laneEnabled === undefined
-    ? enabledAccounts.filter(account => statusOf(account.id)?.todayCheckedIn === true).length
-    : laneEnabled.filter(account => account.checkin?.todayCheckedIn === true).length
-  // An unknown status is treated as "not yet" so the button stays claimable
-  // until the first refresh lands; a zero-account channel never reads as
-  // "all claimed", because there is nothing to have claimed.
-  const allClaimedToday = shownEnabled > 0 && checkedInToday === shownEnabled
+  const shownAccounts = view.total
+  const shownEnabled = view.enabled
+  /*
+    余额：只有"这一页的账号确实有余额"的渠道才画那一格。
+    pack 声明了 credits（有单位的是美元/百分比的另算），或者池来源下的账号自己能报余额。
+  */
+  const showCredit = channel.credits === undefined
+    ? view.source.kind === 'pool' && view.balance.measured > 0
+    : true
+  const balanceLabel = ((): string => {
+    const shown = balanceDisplay(view.balance)
+    if (shown.kind === 'unknown') {
+      // 加载中与"读不到"要分开：前者会自己好，后者得重试。
+      return view.state === 'loading' ? (t?.('channelpool.balanceLoading') ?? '…') : '—'
+    }
+    if (shown.kind === 'complete') return amount(shown.known)
+    // 部分未知：给出已知小计，覆盖数由副标题说。
+    return amount(shown.known)
+  })()
+  const balanceCoverage = view.balance.complete || view.balance.measured === 0
+    ? undefined
+    : `${String(view.balance.measured)}/${String(view.balance.total)}`
+  const checkedInToday = view.checkin.checked
+  const allClaimedToday = view.checkin.allDone
   const claimedToday = checkedInToday
   /* 有签到路径的渠道才画「全部领取」：pack 的 credits.claimAll，或插件自己的签到路由 */
   const canClaim = channel.credits?.claim === true || OWN_CHECKIN_CHANNELS[channel.id] !== undefined
@@ -2754,14 +2931,25 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   const visibleModels = modelsMatching(chosenEntry, query)
   const mode = modeOf(channel.id)
   /*
-    积分自动化：后台调度器（pack 的 autoCheckin）遍历**所有有账号的渠道**，
-    对每一家调 `credits.claimAll` —— 不是只跑 WorkBuddy。
+    积分自动化这一格只出现在 **WorkBuddy 国内页**上（F5）。
 
-    所以「能签到的渠道」都该有这个开关；判据就是 canClaim
-    （pack 声明了 claim，或插件自己有签到路由）。
-    原来这里写死 `channel.id === 'buddy'`，是基于「只跑国内版」的旧认知。
+    这里必须按"这些 props 到底连到谁"来判断，而不是按"这个渠道能不能签到"：
+    传进来的 onAutoClaim / onAutoClaimRun / autoClaimReport 全部接在
+    WorkBuddyScheduler 上（PoolCard 里传的是 statusOf('cn')?.automation 与
+    runAutomationJob('cn')）。一个第三方渠道（trae、cline、zcode…）即使
+    `credits.claim === true`，在这里按下这个开关，改的也是 WorkBuddy 的调度器 ——
+    用户以为关掉了自己那家的自动领取，实际关的是别处的另一个东西。
+
+    曾经的写法把它放宽成 `canClaim`，理由写的是"调度器遍历所有有账号的渠道"，
+    那条结论对 pack 的 `usage.autoCheckin` 成立；但这一页的 props 不是那个接口
+    （交接文档 4.4：两者是两套接口），所以这条放宽改错了对象。
+
+    真正的 `usage.autoCheckin` 开关在渠道卡上（channelpool.autoClaim 之外的
+    'chan.autoCheckin'），沿它自己的契约走。
   */
-  const showAutomation = canClaim && onAutoClaim !== undefined
+  const showAutomation = channel.ownedByPool === true
+    && poolRegionOf(channel.id) === 'cn'
+    && onAutoClaim !== undefined
 
   /*
     腾讯 Marvis：按 token 计，不是积分（设计稿 marvis.html）。
@@ -2796,21 +2984,91 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
     }
   }
 
-  /** 「全部领取」：自有签到路由的几家走插件路由，其余走 pack。 */
+  /**
+   * 「全部领取」。
+   *
+   * 三条路径，按「这批账号到底属于谁」分：
+   * 1. **池 lane**（WorkBuddy 国内/国际）：账号是插件池的，所以必须逐号走池的签到
+   *    路由。3.2.0 在这里调的是 pack 的 `credits.claimAll` —— 它说的是渠道包自己
+   *    那两个账号，池里另外两个一次也没被提交（F2 的另一半）。批量编排在
+   *    pool-actions 里：启用+活动开着+明确未签的才提交，未知的先复查。
+   * 2. **自有签到路由**的几家：走插件自己的路由。
+   * 3. 其余：pack 的 `credits.claimAll`。
+   *
+   * 三条都在结尾回读余额/状态 —— 领没领到与数字对不对得上，是两件事。
+   */
   const claimAllFor = async (provider: string): Promise<void> => {
-    if (OWN_CHECKIN_CHANNELS[provider] === undefined) { await claim(provider); return }
+    const lane = laneOf(provider)
+    /* 判据本身也在 pool-actions 里，好让「池 lane 不走 pack」这条被测试钉住 */
+    const route = claimRouteFor({
+      hasPoolLane: lane?.actions !== undefined,
+      hasOwnCheckinRoute: OWN_CHECKIN_CHANNELS[provider] !== undefined,
+    })
+    if (route === 'pool' && lane?.actions !== undefined) {
+      markBusy(provider, true)
+      try {
+        const report = await lane.actions.claimAll()
+        if (!mountedRef.current) return
+        const summary = summarizeBatch(report, {
+          claimed: n => `已领取 ${String(n)} 个账号`,
+          failed: n => `${String(n)} 个失败`,
+        })
+        const detail = [...report.results.filter(row => row.outcome === 'failed'), ...report.skipped]
+          .map(row => `${row.label}：${row.error ?? '失败'}`)
+          .join('；')
+        setNotice(detail === '' ? summary.text : `${summary.text}（${detail}）`)
+        await refreshBalances(provider, true)
+      } finally {
+        if (mountedRef.current) markBusy(provider, false)
+      }
+      return
+    }
+    if (route === 'pack') { await claim(provider); return }
     markBusy(provider, true)
     try {
       const said = await ownCheckin(provider)
       if (!mountedRef.current) return
       if (said !== undefined) setNotice(said)
+      /* 自有签到路由同样要回读状态：有签到就没有「今日已领」，那是另一件事（4.4） */
       await refreshBalances(provider, true)
+      await refreshStatuses(provider)
     } finally {
       if (mountedRef.current) markBusy(provider, false)
     }
   }
-  /** 「重新检测账号」：丢掉缓存，重读账号与余额。 */
+  /**
+   * 「重新检测账号」。
+   *
+   * 池 lane 上这是**全池**动作：交接文档 4.3 要求一次点击产生一次全池 rescan，
+   * 完成后读两区（两边的账号集合可能一起变了），区域计数取区域状态快照而不是
+   * rescan 的返回值（那是全池数，不是这一区的）。
+   *
+   * 3.2.0 里这个按钮根本没接这条路径 —— 它只是重读了渠道包数据，池的账号一个
+   * 都没重新扫（F3）。别家的渠道没有池，照旧走缓存失效 + 重读。
+   */
   const recheck = async (provider: string): Promise<void> => {
+    const lane = laneOf(provider)
+    if (lane?.actions !== undefined) {
+      markBusy(provider, true)
+      try {
+        const outcome = await lane.actions.rescan()
+        const region = poolRegionOf(channel.id)
+        const here = region === undefined ? undefined : outcome.byRegion[region]
+        if (mountedRef.current) {
+          setNotice(here === undefined
+            ? `已重新检测，全池 ${String(outcome.total)} 个账号（本区数量待刷新）`
+            : `已重新检测，本区 ${String(here)} 个账号（全池 ${String(outcome.total)} 个）`)
+        }
+        await refreshBalances(provider, true)
+      } catch (cause: unknown) {
+        if (mountedRef.current) {
+          setNotice(`重新检测失败：${cause instanceof Error ? cause.message : String(cause)}`)
+        }
+      } finally {
+        if (mountedRef.current) markBusy(provider, false)
+      }
+      return
+    }
     invalidatePoolSnapshot()
     setEnabled(new Map())
     await load()
@@ -2968,11 +3226,18 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
           </div>
         ) : (
         <div className="kpis" style={{
-          gridTemplateColumns: `repeat(${channel.credits === undefined ? '2' : '3'},minmax(0,1fr))`,
+          gridTemplateColumns: `repeat(${showCredit ? '3' : '2'},minmax(0,1fr))`,
         }}>
           <div className="kpi">
             <span className="kpi-k">{t?.('channelpool.statAccounts') ?? '账号'}</span>
-            <span className="kpi-v num">{String(shownEnabled)}</span>
+            {/*
+              这一格给的是**总账号数**，与下面的列表行数一致；启用数写在副标题里。
+              以前写的是启用数，于是 4 个账号（1 个停用）在这里显示「3」，列表却是 4 行。
+            */}
+            <span className="kpi-v num">{String(shownAccounts)}</span>
+            {shownAccounts === shownEnabled ? null : (
+              <span className="kpi-sub">{`${String(shownEnabled)} ${t?.('channelpool.statEnabled') ?? '启用'}`}</span>
+            )}
           </div>
           <div className="kpi">
             <span className="kpi-k">{t?.('channelpool.statModels') ?? '模型'}</span>
@@ -2981,15 +3246,22 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
               <span className="kpi-u">/{String(models.length)}</span>
             </span>
           </div>
-          {channel.credits === undefined ? null : (
+          {showCredit ? (
             <div className="kpi">
               <span className="kpi-k">{t?.('channelpool.statCredit') ?? '剩余积分'}</span>
               <span className="kpi-v num">
-                {chosenCredit}
+                {balanceLabel}
                 <span className="kpi-u">{unit}</span>
               </span>
+              {/*
+                部分未知时把覆盖数写出来：「600」看起来是个确定的数字，实际上有个账号
+                的余额还没读到。这一行是那个区别的唯一提示。
+              */}
+              {balanceCoverage === undefined ? null : (
+                <span className="kpi-sub">{`${t?.('channelpool.knownOnly') ?? '已知'} ${balanceCoverage}`}</span>
+              )}
             </div>
-          )}
+          ) : null}
         </div>
         )}
 
@@ -3022,14 +3294,14 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
           </div>
           {!showAutomation ? null : (
             <div className="policy">
-              <span className="policy-k">{t?.('channelpool.autoClaim') ?? '积分自动化'}</span>
+              <span className="policy-k">{t?.('channelpool.poolAutomation') ?? 'WorkBuddy 账号池自动化'}</span>
               <div className="policy-v">
                 <button
                   type="button"
                   role="switch"
                   className="sw"
                   aria-checked={autoClaim === true}
-                  aria-label={t?.('channelpool.autoClaim') ?? '积分自动化'}
+                  aria-label={t?.('channelpool.poolAutomation') ?? 'WorkBuddy 账号池自动化'}
                   disabled={autoClaimBusy === true}
                   onClick={() => { onAutoClaim?.(autoClaim !== true) }}
                 />
@@ -3054,7 +3326,8 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
                 </button>
               </div>
               <span className="policy-hint">
-                {t?.('channelpool.autoClaimHint') ?? '开着就会在后台领每天的积分，不用手动点。'}
+                {t?.('channelpool.poolAutomationHint')
+                  ?? '只管 WorkBuddy 账号池：签到覆盖国内与国际，任务、活动、连续奖励、出行与补偿只跑国内。其他渠道的自动领取由各自的渠道卡控制。'}
               </span>
               {/*
                 最近一轮的结果。放在提示语下面而不是另起一块：它回答的是同一个
@@ -3296,9 +3569,23 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
                                 : '签到'}
                           </button>
                         )}
-                        <button type="button" className="tiny"
-                          disabled={busy || account.preferred}
-                          title={t?.('channelpool.preferHint') ?? '优先用这个账号接下一次请求'}
+                        {/*
+                          「设为首选」/「取消首选」是同一个按钮的两个分支。
+
+                          3.2.0 的 disabled 写的是 `busy || account.preferred` ——
+                          已经在首选的账号上，这个按钮恰好被禁用，于是 `onPrefer(null)`
+                          那条清除分支永远点不到（F6）。用户能做的只有改选另一个账号，
+                          而"一个都不首选"这个真实状态在界面上不存在。
+
+                          改成只跟忙碌态走：首选着的账号上再点一次就是取消。
+                        */}
+                        <button type="button"
+                          className={account.preferred ? 'tiny is-on' : 'tiny'}
+                          aria-pressed={account.preferred === true}
+                          disabled={busy}
+                          title={account.preferred
+                            ? (t?.('row.accountPreferClearHint') ?? '取消首选，交回按使用方式选号')
+                            : (t?.('channelpool.preferHint') ?? '优先用这个账号接下一次请求')}
                           onClick={() => { lane.onPrefer(account.preferred ? null : account.id) }}>
                           {account.preferred
                             ? (t?.('channelpool.preferred') ?? '首选')
@@ -3315,6 +3602,42 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
                   </article>
                 )
               })}
+            </div>
+          )}
+          {/*
+            已移出的账号（F6）。
+
+            「移出池子」是个不可逆按钮：没有这一块，用户按完就再也找不到它 ——
+            3.2.0 的后端一直在 status 里返回 `ignored`，四个 locale 键和整段样式
+            也都在，但界面从来不读那个字段，于是这个列表在页面上不存在。
+
+            只在有内容时画：一个空的「已移出的账号」区块会让读者以为移出过什么。
+            用的都是设计稿既有类名（.sec / .sec-head / .sec-title / .sec-n /
+            .row / .tiny），不新造布局类 —— 见 AGENTS.md。
+          */}
+          {lane?.ignored === undefined || lane.ignored.length === 0 ? null : (
+            <div className="sec">
+              <div className="sec-head">
+                <span className="sec-title">{t?.('row.ignoredTitle') ?? '已移出的账号'}</span>
+                <span className="sec-n num">{String(lane.ignored.length)}</span>
+              </div>
+              {lane.ignored.map(entry => (
+                <div className="row" key={entry.id}>
+                  <span className="ch-title" title={entry.id}>{entry.label}</span>
+                  <span className="hint">
+                    {t?.('row.ignoredSummary', { count: 1 }) ?? '这个账号已不在池中'}
+                  </span>
+                  <button
+                    type="button"
+                    className="tiny"
+                    disabled={isBusy || lane.busyId === entry.id}
+                    title={t?.('row.ignoredRestoreHint') ?? '把这个账号放回池子'}
+                    onClick={() => { lane.onRestore?.(entry) }}
+                  >
+                    {t?.('row.ignoredRestore') ?? '恢复'}
+                  </button>
+                </div>
+              ))}
             </div>
           )}
           {lane !== undefined ? null : accounts.length === 0 ? (
@@ -3399,11 +3722,31 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
                         {channel.credits?.status !== true && checkin === undefined ? null : (
                           <div className="fact">
                             <dt>{t?.('channelpool.todayClaimed') ?? '今日签到'}</dt>
+                            {/*
+                              三态，不是两态（4.4「仅支持手动领取的渠道展示未知签到状态」）。
+
+                              原来只有 `todayCheckedIn === true ? 已领 : 未领` —— 于是"问不到"
+                              和"确实没签"都印成「未领」。F4 把显式 false 解析出来之后，
+                              `undefined` 才真正等于未知，这一格才有第三种画法：
+                              没读到就写「状态未知」，读取失败连理由一起给出来。
+                            */}
                             {checkin?.todayCheckedIn === true
                               ? <dd style={{ color: 'var(--accent)' }}>
                                   已领{typeof checkin.todayCredit === 'number' ? ` +${amount(checkin.todayCredit)}` : ''}
                                 </dd>
-                              : <dd>{t?.('channelpool.notClaimed') ?? '未领'}</dd>}
+                              : checkin?.todayCheckedIn === false
+                                ? <dd>{t?.('channelpool.notClaimed') ?? '未领'}</dd>
+                                : <dd
+                                    data-tone={chosenEntry.statusError === undefined ? undefined : 'err'}
+                                    title={chosenEntry.statusError}
+                                    style={chosenEntry.statusError === undefined
+                                      ? { color: 'var(--faint)' }
+                                      : { color: 'var(--warn)' }}
+                                  >
+                                    {chosenEntry.statusError === undefined
+                                      ? (t?.('channelpool.checkinUnknown') ?? '状态未知')
+                                      : (t?.('channelpool.checkinUnreadable') ?? '状态读不到')}
+                                  </dd>}
                           </div>
                         )}
                       </dl>

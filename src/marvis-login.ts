@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { MARVIS_UA, marvisExt, QQ_APP_ID, WX_APP_ID, MARVIS_BASE } from './marvis-protocol.ts'
-import { deviceGuid } from './marvis-device.ts'
+import { DeviceIdUnavailableError, deviceGuid } from './marvis-device.ts'
 import { chromiumCandidates, defaultBrowser } from './default-browser.ts'
 
 /** The fixed callback the service registered. Its query decides which app the code belongs to. */
@@ -190,7 +190,20 @@ export async function browserLogin(options: {
       reason: '没找到可用的 Chromium 内核浏览器（Chrome / Edge / 360 / QQ 浏览器都行）',
     }
   }
-  const guid = deviceGuid()
+  /*
+    设备号在这一步就可能拿不到（F7）。
+
+    这是一条**用户主动发起**的登录，所以缺设备号要变成一句能读的失败原因，而不是从
+    这里抛出去变成一张 500 的页面 —— 用户点了「登录」,看到的应该是"这台机器没有可用
+    的设备标识，请装客户端"或者别的实情，而不是一个未捕获异常。
+  */
+  let guid: string
+  try {
+    guid = deviceGuid()
+  } catch (cause: unknown) {
+    if (cause instanceof DeviceIdUnavailableError) return { ok: false, reason: cause.problem }
+    throw cause
+  }
   const url = authorizeUrl(options.loginType, guid)
   const timeoutMs = options.timeoutMs ?? 5 * 60_000
   const profile = mkdtempSync(join(tmpdir(), 'xdpool-marvis-login-'))

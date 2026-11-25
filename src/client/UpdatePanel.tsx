@@ -21,7 +21,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { POOL_UPDATE_CHECK_PATH, POOL_UPDATE_INSTALL_PATH } from '../status-paths.ts'
-import { compareVersions } from '../update-check.ts'
+import { compareVersions } from '../version.ts'
 import type { XdPoolSettingsKey } from './locales.ts'
 
 type Translate = (key: XdPoolSettingsKey, params?: Record<string, unknown>) => string

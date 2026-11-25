@@ -55,6 +55,24 @@ import { GatewayPage } from './GatewayPage.tsx'
 import { RegionCardPane, RegionCardTile, RegionCardTrigger, regionCardStyle } from './region-card.tsx'
 import type { RegionCardState } from './region-card.tsx'
 import { REGION_CHANNEL_BY_REGION } from './region-card.tsx'
+import { buildPoolView, createRegionGate, type AccountRow } from './account-view.ts'
+import {
+  classifyRestore,
+  ignoredFrom,
+  restoreMessage,
+  restoreSucceeded,
+  type IgnoredEntry,
+  type RestoreOutcome,
+} from './ignored-restore.ts'
+import {
+  claimAll,
+  outcomeFromClaim,
+  rescanRegions,
+  summarizeBatch,
+  type PoolActionResult,
+  type PoolBatchReport,
+  type RescanOutcome,
+} from './pool-actions.ts'
 import { POOL_CHANNELS_PATH } from '../status-paths.ts'
 import { isFreeNow, promoStatusFor } from '../promo.ts'
 import { badgeLabels, freeBadgeKind } from '../badges.ts'
@@ -650,6 +668,22 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   const [flash, setFlash] = useState<string | undefined>(undefined)
   /** Account id whose daily claim is currently in flight. */
   const [checkinBusyId, setCheckinBusyId] = useState<string | undefined>(undefined)
+  /**
+   * 本批已经领到、但界面还没读回来的账号。
+   *
+   * 交接文档 4.3：领取成功且刷新失败时提示「已领取、状态待刷新」，并且
+   * **成功账号不会因为刷新失败被立即再次提交**。服务端的「先查后领」是第二道闸，
+   * 但它要求网络往返成功 —— 用户点第二下时如果回读仍然失败，光靠它就会再发一次。
+   * 所以这里记住刚领到谁，下一批把它们排除，直到某次回读真的成功。
+   */
+  const claimedIds = useRef<Set<string>>(new Set())
+  /**
+   * 正在跑「全部领取」的区域，用于让那两张卡上的按钮变灰。
+   *
+   * 传的是**启动时**的区域而不是当前看的那一张：批次按原 ID 集合收尾，
+   * 期间用户切到另一张卡，另一张不该显示"领取中"。
+   */
+  const [batchRegion, setBatchRegion] = useState<PoolRegion | undefined>(undefined)
   /** Account id whose enable/disable switch is in flight, if any. */
   const [accountBusyId, setAccountBusyId] = useState<string | undefined>(undefined)
   /**
@@ -692,6 +726,13 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
+  /**
+   * 区域刷新的代次守卫。
+   *
+   * 放在 ref 里而不是 state：它只是"谁更新"的记账，改变它不该引起重渲染。
+   * 见 account-view.ts 的 createRegionGate。
+   */
+  const regionGate = useRef(createRegionGate())
   /**
    * Connectivity readings, keyed by the row's model id.
    *
@@ -766,6 +807,12 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
    * last answer stays in its own slot (see `statusByRegion`).
    */
   const refresh = useCallback(async (region: PoolRegion, signal?: AbortSignal): Promise<PoolWebStatus | undefined> => {
+    /*
+      取号必须在**发出请求之前**。同一个区域会被反复刷新 —— 轮询、按钮回读、切换区域后
+      的补读 —— 而它们不保证按发出顺序返回。慢的那个后到就会把新数据盖成旧数据，用户看到
+      的是"刚点完签到，数字又变回去了"。号大的代表更新的请求，只有它才准落地。
+    */
+    const ticket = regionGate.current.issue(region)
     try {
       const response = await fetch(`${POOL_STATUS_PATH}?region=${region}`, {
         headers: { accept: 'application/json' },
@@ -774,7 +821,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       })
       const value: unknown = await response.json().catch(() => undefined)
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      if (mounted.current && signal?.aborted !== true) {
+      if (mounted.current && signal?.aborted !== true && regionGate.current.accept(region, ticket)) {
         setStatusByRegion(prev => ({ ...prev, [region]: value as PoolWebStatus }))
         setError(undefined)
       }
@@ -902,13 +949,8 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     setBusyRegion(region)
     setFlash(undefined)
     try {
-      const response = await fetch(POOL_RESCAN_PATH, {
-        method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin',
-      })
-      const body = await response.json() as { accounts?: number; error?: string }
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
-      await refresh(region)
-      if (mounted.current) setFlash(t?.('row.accountsRescanned', { count: body.accounts ?? 0 }) ?? '')
+      const outcome = await rescanAll()
+      if (mounted.current) setFlash(t?.('row.accountsRescanned', { count: outcome.total }) ?? '')
     } catch (cause: unknown) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -955,6 +997,42 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
   }
 
   /**
+   * 单号签到的**可等待**版本。
+   *
+   * 旧版是 fire-and-forget 的 void 函数：它自己吞掉异常、自己设提示条，于是
+   * 没有任何调用方能知道「B 到底领到了没有」。批量按钮需要这个答案，所以把它
+   * 拆成两层：这一层只负责发请求并回答结果（失败也是返回值），下面那层
+   * {@link claimCheckin} 保留按钮自己的忙碌态和提示条。两者走同一个出口，
+   * 所以按钮和批量不可能对同一件事有两种说法。
+   *
+   * `refresh` 明确**不**在这里做：批量要求「批次结束统一回读」，逐号回读会把
+   * 八个账号打成八次状态请求，而其中七次的答案马上就被覆盖。单号按钮自己回读。
+   */
+  const claimOne = useCallback(async (region: PoolRegion, accountId: string): Promise<PoolActionResult> => {
+    /*
+      标签只用于结果文案（「B 失败」而不是一串 id）。取不到就退回 id —— 它是
+      用来读的，不是用来判断的，所以不值得为它多读一次状态。
+    */
+    const label = statusByRegion[region]?.accounts.find(account => account.id === accountId)?.label ?? accountId
+    try {
+      const response = await fetch(POOL_CHECKIN_PATH, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ accountId }),
+      })
+      const body: unknown = await response.json().catch(() => undefined)
+      return { accountId, label, ...outcomeFromClaim(body, response.ok) }
+    } catch (cause: unknown) {
+      return {
+        accountId,
+        label,
+        outcome: 'failed',
+        error: cause instanceof Error ? cause.message : String(cause),
+      }
+    }
+  }, [statusByRegion])
+  /**
    * Claim one account's daily check-in. The account id travels in the body so
    * the Host can never guess: a click on account B's button can only ever
    * collect account B's reward. The status is re-read afterwards so the card
@@ -964,28 +1042,125 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     setCheckinBusyId(accountId)
     setFlash(undefined)
     try {
-      const response = await fetch(POOL_CHECKIN_PATH, {
-        method: 'POST',
-        headers: { accept: 'application/json', 'content-type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ accountId }),
-      })
-      const body = await response.json().catch(() => undefined) as
-        | { claim?: { credit?: number }; error?: string }
-        | undefined
-      if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`)
+      const result = await claimOne(region, accountId)
+      if (result.outcome === 'failed') throw new Error(result.error ?? '签到失败')
       await refresh(region)
-      const credit = body?.claim?.credit ?? 0
-      if (mounted.current) {
-        setFlash(t?.('row.checkinClaimedReward', { credit: formatNumber(credit) })
-          ?? `Claimed +${formatNumber(credit)} credits`)
+      if (!mounted.current) return
+      if (result.outcome === 'alreadyClaimed') {
+        claimedIds.current.add(accountId)
+        setFlash(t?.('row.checkinAlready') ?? '今天已经签到过了')
+        return
       }
+      claimedIds.current.add(accountId)
+      const credit = result.credit ?? 0
+      setFlash(t?.('row.checkinClaimedReward', { credit: formatNumber(credit) })
+        ?? `Claimed +${formatNumber(credit)} credits`)
     } catch (cause: unknown) {
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       if (mounted.current) setCheckinBusyId(undefined)
     }
   }
+  /**
+   * 这一区的最新账号行，与详情页画的是同一份投影。
+   *
+   * 抽出来是为了让批量目标与界面上的行**不可能**是两份数据：中栏画了 4 行，
+   * 「全部领取」就只可能从这 4 行里挑。`buildPoolView` 是这一步的唯一实现处
+   * （见 account-view.ts）。
+   */
+  const rowsOf = useCallback((region: PoolRegion): readonly AccountRow[] => {
+    const here = statusByRegion[region]
+    if (here === undefined) return []
+    return buildPoolView({
+      channelId: REGION_CHANNEL_BY_REGION[region],
+      region,
+      status: here,
+      state: 'ready',
+    }).rows
+  }, [statusByRegion])
+  /**
+   * 读一次这一区的最新状态，并如实回答成没成。
+   *
+   * `refresh` 失败时返回 undefined（它已经把错误写进页面），所以批量收尾不能
+   * 用它的返回值判断结果 —— 这里包一层，把「答不上来」变成一个明确的
+   * `{ok:false}`，交给 summarizeBatch 说「状态待刷新」。
+   */
+  const refreshRegion = useCallback(async (region: PoolRegion): Promise<{ ok: boolean; error?: string | undefined }> => {
+    const status = await refresh(region)
+    return status === undefined
+      ? { ok: false, error: '状态回读失败' }
+      : { ok: true }
+  }, [refresh])
+  /**
+   * 「全部领取」。
+   *
+   * 目标、复查、按序提交、统一回读这五步都在 pool-actions 里（它们的**次序**
+   * 本身就是契约，见 4.3）。这里只注入三个真实动作，并把报告原样交回去 ——
+   * 提示条由 ChannelPoolSection 落，因为那里才知道该显示在哪个位置。
+   *
+   * `setBatchRegion` 记的是**启动时**的区域：交接文档要求批次按原 ID 集合收尾，
+   * 结果归属启动时区域，所以切到另一张卡不会让这批结果跑过去，也不会让那一张
+   * 卡的按钮变灰。
+   */
+  const runClaimAll = async (region: PoolRegion): Promise<PoolBatchReport> => {
+    setBatchRegion(region)
+    try {
+      const report = await claimAll({
+        rows: rowsOf(region),
+        skipIds: claimedIds.current,
+        claim: accountId => claimOne(region, accountId),
+        recheck: accountId => recheckAccount(region, accountId),
+        refresh: () => refreshRegion(region),
+      })
+      /*
+        这次真的领到的账号记下来；回读成功就清空 —— 那时界面上的"已签"已经来自
+        服务端，不再需要我们替它记账。
+      */
+      for (const result of report.results) {
+        if (result.outcome === 'claimed' || result.outcome === 'alreadyClaimed') {
+          claimedIds.current.add(result.accountId)
+        }
+      }
+      if (report.refresh.ok) claimedIds.current.clear()
+      return report
+    } finally {
+      if (mounted.current) setBatchRegion(undefined)
+    }
+  }
+  /**
+   * 单号状态复查（供批量前的「未知先重查」与 T3 的「失败账号可重试」）。
+   */
+  const recheckAccount = async (region: PoolRegion, accountId: string): Promise<AccountRow | undefined> => {
+    const fresh = await refresh(region)
+    if (fresh === undefined) return undefined
+    return rowsOf(region).find(row => row.id === accountId)
+  }
+  /**
+   * 「重新检测」：一次全池 rescan，完成后读**两个**区域。
+   *
+   * 三处都是原先坏掉的：
+   * 1. rescan 之后只 `refresh(region)` —— 另一个区域还是旧数据，而 rescan 本来就
+   *    扫的是全池，两边的账号集合可能一起变了（交接文档 4.3：重读两区）。
+   * 2. 页面上那个按钮根本没接这个函数（见 ChannelPoolSection 的 recheck）。
+   * 3. 区域计数必须来自区域状态快照，不能拿 rescan 的返回值当某一区的数量 ——
+   *    它答的是全池数。
+   */
+  const rescanAll = async (): Promise<RescanOutcome> => rescanRegions({
+    rescan: async () => {
+      const response = await fetch(POOL_RESCAN_PATH, {
+        method: 'POST', headers: { accept: 'application/json' }, credentials: 'same-origin',
+      })
+      const body = await response.json() as { accounts?: number; error?: string }
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body.accounts ?? 0
+    },
+    /*
+      区域数量必须来自区域快照。rescan 的返回值是全池数，用它当某一区的数量
+      会让"国内 2 个、国际 1 个"都显示成 3。
+    */
+    refresh: async region => (await refresh(region as PoolRegion))?.accounts.length,
+    regions: REGION_CARDS,
+  })
   /**
    * Switch one account in or out of the pool.
    *
@@ -1004,6 +1179,14 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
    * international list.
    */
   const statusOf = (region: PoolRegion): PoolWebStatus | undefined => statusByRegion[region]
+  /**
+   * 已移出的账号清单。
+   *
+   * 它是全池数据，所以两个区读到的是同一份；这里仍按区取，是因为某一区的状态可能
+   * 还没到（返回空清单即可），而不是因为两区会有不同的忽略列表。
+   */
+  const ignoredOf = (region: PoolRegion): readonly IgnoredEntry[] => ignoredFrom(statusOf(region))
+
   const toggleAccountDisabled = async (region: PoolRegion, accountId: string, disabled: boolean): Promise<void> => {
     const write = settingsScope?.set
     if (write === undefined) {
@@ -1062,6 +1245,72 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
     } finally {
       if (mounted.current) setAccountBusyId(undefined)
     }
+  }
+  /**
+   * 把一个被移出池子的账号放回去。
+   *
+   * 交接文档 4.3：「基线 index.ts 在 ignored=false 时已经执行 scan，前端成功后直接回读」，
+   * 所以这里**不**额外调 scan，只发 ignore 路由然后把两区读一遍。
+   *
+   * 但"回读"这件事本身可能失败，而且失败时不能装作成功：忽略确实解除了，账号却
+   * 还没回到池里，此刻发请求仍然用不上它。四种结局分开报（见 ignored-restore.ts），
+   * 其中"回读里没有它"这一支要提示重新登录或重新检测 —— 本机的凭据可能已经不在了。
+   */
+  const restoreIgnored = async (entry: IgnoredEntry): Promise<RestoreOutcome> => {
+    setAccountBusyId(entry.id)
+    setFlash(undefined)
+    try {
+      let response: { ok: boolean; error?: string | undefined }
+      try {
+        const answer = await fetch(POOL_ACCOUNT_IGNORE_PATH, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountId: entry.id, ignored: false }),
+        })
+        if (!answer.ok) {
+          const detail = await answer.json().catch(() => ({})) as { error?: string }
+          response = { ok: false, error: detail.error ?? `HTTP ${answer.status}` }
+        } else {
+          response = { ok: true }
+        }
+      } catch (cause: unknown) {
+        response = { ok: false, error: cause instanceof Error ? cause.message : String(cause) }
+      }
+      // 写失败就到此为止：账号仍在忽略列表里，没有必要回读、也不该暗示它可能好了。
+      if (!response.ok) {
+        return { kind: 'failed', label: entry.label, error: response.error ?? '恢复请求被拒绝' }
+      }
+      const reads = await Promise.all(REGION_CARDS.map(async region => ({
+        ok: true as const,
+        status: await refresh(region),
+      })))
+      const refreshed = reads.filter(read => read.status !== undefined)
+      if (refreshed.length === 0) {
+        return {
+          kind: 'scanFailed',
+          label: entry.label,
+          error: '两个区的状态都没能读回来',
+        }
+      }
+      // 这一份清单是全池数据，任一区的回读里出现就说明它真的回到池里了。
+      const back = refreshed.some(read =>
+        (read.status?.accounts ?? []).some(account => account.id === entry.id))
+      return classifyRestore({
+        label: entry.label,
+        response,
+        present: back,
+      })
+    } finally {
+      if (mounted.current) setAccountBusyId(undefined)
+    }
+  }
+  /** 恢复入口的点击包装：结局写成提示条，成功与失败用不同的语气。 */
+  const restoreAccount = async (entry: IgnoredEntry): Promise<void> => {
+    const outcome = await restoreIgnored(entry)
+    if (!mounted.current) return
+    const message = restoreMessage(outcome)
+    if (restoreSucceeded(outcome)) setFlash(message)
+    else setError(message)
   }
   /**
    * Pin one account to be tried first, or clear the pin.
@@ -1578,10 +1827,26 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
       activeAccountId: here?.activeAccountId,
       claimingId: checkinBusyId,
       busyId: accountBusyId,
+      batchBusy: batchRegion === region,
       onClaim: accountId => { void claimCheckin(region, accountId) },
       onToggle: (accountId, disabled) => { void toggleAccountDisabled(region, accountId, disabled) },
       onPrefer: accountId => { void setPreferredAccount(region, accountId) },
       onIgnore: accountId => { void setAccountIgnored(region, accountId, true) },
+      ignored: ignoredOf(region),
+      onRestore: entry => { void restoreAccount(entry) },
+      /*
+        可等待的动作服务：ChannelPoolSection 的「全部领取」与「重新检测」用它。
+        与上面那几个 void 包装最终走同一个函数，所以按钮和批量不会对同一件事
+        给出两种答案（交接文档 4.3 的那条「避免把吞异常的 void 包装当批量服务」）。
+      */
+      actions: {
+        claim: accountId => claimOne(region, accountId),
+        claimAll: () => runClaimAll(region),
+        recheckAccount: accountId => recheckAccount(region, accountId),
+        rescan: () => rescanAll(),
+        rows: () => rowsOf(region),
+        refresh: () => refreshRegion(region),
+      },
     }
   }
   const poolLanes: Readonly<Record<string, PoolLaneBinding>> = {

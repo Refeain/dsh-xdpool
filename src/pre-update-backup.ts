@@ -54,9 +54,8 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
+import { KNOWN_PACKAGE_NAMES, LEGACY_PACKAGE_NAME, PACKAGE_NAME } from './update-package.ts'
 
-/** 本插件发布用的包名。 */
-const PACKAGE = 'dsh-xdpool'
 /** 备份根目录名，位于插件数据目录下。 */
 export const PRE_UPDATE_DIR_NAME = 'pre-update'
 /** 只保留最近几份。 */
@@ -70,8 +69,23 @@ export const DEPENDENCY_BLOCKS = ['dependencies', 'devDependencies', 'optionalDe
 
 /** 插件数据目录顶层不进备份的条目。 */
 const SKIP_TOP_LEVEL: ReadonlySet<string> = new Set([PRE_UPDATE_DIR_NAME, 'login-profiles'])
-/** profile 目录里要备份的文件。 */
-const PROFILE_FILES = ['package.json', 'settings.yaml', 'settings.yml', 'settings.json', 'cordis.patch.yml'] as const
+/**
+ * profile 目录里要备份的文件。
+ *
+ * 锁文件必须在内：更新会写 package.json 并让 pnpm 重写 pnpm-lock.yaml，恢复时不能只回退
+ * 清单 —— 一份新清单配一份旧锁文件正是「更新了却没有生效」的那个状态。回退要能把两者
+ * 一起还原，首先得有一份保存下来的锁文件。
+ */
+const PROFILE_FILES = [
+  'package.json',
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'yarn.lock',
+  'settings.yaml',
+  'settings.yml',
+  'settings.json',
+  'cordis.patch.yml',
+] as const
 
 /** 一份数据：原来在哪，备份到哪。 */
 export interface BackupEntry {
@@ -84,17 +98,30 @@ export interface BackupEntry {
 
 /** restore.json 的内容。 */
 export interface RestoreManifest {
-  package: typeof PACKAGE
+  /**
+   * 备份时本插件在 profile 里的包名。
+   *
+   * 新备份写现在的发布身份（`@refeain/dsh-xdpool`）；旧 format=1 备份由写死裸名的 fork 创建，
+   * 这里可能是 `dsh-xdpool`。读取时两者都接受，写新备份时只用规范名。
+   */
+  package: string
   format: 1
   createdAt: string
   previousVersion: string
   targetVersion: string
   profileDir: string
   packageJsonPath: string
-  /** 更新前 dsh-xdpool 的 spec（第一处依赖块里的）。 */
+  /** 更新前本插件的 spec（第一处依赖块里的）。 */
   previousSpec?: string
   /** 每个依赖块各自的原 spec。 */
   previousSpecs: Record<string, string>
+  /**
+   * 依赖块 -> 更新前用的键名。
+   *
+   * 旧备份没有这个字段，那时键就是 `package`。回退必须写回**原来那一行的键**：一个从
+   * 裸名装过来的 profile，回退时写回 `@refeain/…` 会装出一个它原来没有的依赖。
+   */
+  previousKeys?: Record<string, string>
   /** 将要写入的新 spec。 */
   newSpec?: string
   /** 回退时写回 package.json 的 spec：优先用备份里那份 .tgz，没有就用原 spec。 */
@@ -113,6 +140,13 @@ export interface PreUpdateBackupOptions {
   targetVersion: string
   /** 依赖块 -> 原 spec。 */
   previousSpecs: Readonly<Record<string, string>>
+  /**
+   * 依赖块 -> 更新前用的键名。
+   *
+   * 省略时按规范包名推断（新备份的常态）。旧裸名 profile 会在更新时迁到规范名，
+   * 这里必须记下原来那行叫 `dsh-xdpool`，回退才能写回同一行而不是造出一行新的。
+   */
+  previousKeys?: Readonly<Record<string, string>>
   newSpec?: string
   env?: NodeJS.ProcessEnv
   /** 用户主目录，测试用。 */
@@ -257,6 +291,8 @@ function localTarballOf(spec: string | undefined, profileDir: string): string | 
 }
 
 function rollbackNote(manifest: RestoreManifest, dir: string): string {
+  // 用备份里记的那一行键名：旧备份是裸名，新备份是 scoped 名。写错名字用户改不动。
+  const key = manifestKey(manifest)
   const lines = [
     `XD Pool 更新前备份`,
     ``,
@@ -264,11 +300,11 @@ function rollbackNote(manifest: RestoreManifest, dir: string): string {
     `更新前版本：${manifest.previousVersion}`,
     `准备更新到：${manifest.targetVersion}`,
     `profile 的 package.json：${manifest.packageJsonPath}`,
-    `更新前的 dsh-xdpool spec：${manifest.previousSpec ?? '（未记录）'}`,
+    `更新前的 ${key} spec：${manifest.previousSpec ?? '（未记录）'}`,
     ``,
     `—— 回退到更新前的版本 ——`,
     `1. 完全退出 DSH。`,
-    `2. 打开 ${manifest.packageJsonPath}，把 "${PACKAGE}" 那一行的值改回：`,
+    `2. 打开 ${manifest.packageJsonPath}，把 "${key}" 那一行的值改回：`,
     `     ${manifest.rollbackSpec ?? manifest.previousSpec ?? '（见 restore.json）'}`,
     `   （或者直接用本目录 profile\\package.json 覆盖它。）`,
     `3. 重新打开 DSH。`,
@@ -352,7 +388,7 @@ export function backupBeforeUpdate(options: PreUpdateBackupOptions): PreUpdateBa
     }
   }
   const manifest: RestoreManifest = {
-    package: PACKAGE,
+    package: PACKAGE_NAME,
     format: 1,
     createdAt: now.toISOString(),
     previousVersion: options.previousVersion,
@@ -361,6 +397,7 @@ export function backupBeforeUpdate(options: PreUpdateBackupOptions): PreUpdateBa
     packageJsonPath: join(options.profileDir, 'package.json'),
     ...(previousSpec === undefined ? {} : { previousSpec }),
     previousSpecs: specs,
+    ...(options.previousKeys === undefined ? {} : { previousKeys: { ...options.previousKeys } }),
     ...(options.newSpec === undefined ? {} : { newSpec: options.newSpec }),
     ...(previousTarball !== undefined
       ? { rollbackSpec: `file:${previousTarball.replaceAll('\\', '/')}`, previousTarball }
@@ -383,7 +420,74 @@ export function backupBeforeUpdate(options: PreUpdateBackupOptions): PreUpdateBa
   return { ok: true, path: dir, manifest }
 }
 
-/** 一份已有的更新前备份。 */
+/** 备份清单里记的本插件名字；缺失时按现在的发布身份。 */
+export function manifestKey(manifest: Partial<RestoreManifest>): string {
+  return typeof manifest.package === 'string' && manifest.package !== '' ? manifest.package : PACKAGE_NAME
+}
+
+/**
+ * 认出一份备份在 profile 里用的是哪一行键。
+ *
+ * 为什么不能只看 `manifest.package`：旧备份由写死裸名的 fork 建，也可能是某个 fork 把它误标成
+ * 自己的名字。真正的证据是备份里那份**原 profile 的 package.json** —— 它记着当时依赖到底
+ * 写在哪个键上。
+ *
+ * 判定顺序：
+ *   1. 备份里的 profile/package.json：每个依赖块里只出现一个已知名字 -> 就是那个键；
+ *   2. 同一块里同时出现两个已知名字 -> 冲突，交给人工选，不猜；
+ *   3. 那份清单里找不到本插件 -> 退回 `manifest.package`（fork 可能改了键名）；
+ *   4. 连 `manifest.package` 都没有 -> 无法判定。
+ */
+export interface BackupIdentity {
+  /** 依赖块 -> 键名。判定失败时为空。 */
+  keys: Record<string, string>
+  /** 判定失败时的中文原因。 */
+  problem?: string
+}
+
+/** 从备份里的原 profile 清单和 restore.json 推断依赖键。 */
+export function identifyBackup(backupDir: string, manifest: Partial<RestoreManifest>): BackupIdentity {
+  const specs = manifest.previousSpecs
+  const blocks = specs !== null && typeof specs === 'object'
+    ? DEPENDENCY_BLOCKS.filter(block => typeof (specs as Record<string, unknown>)[block] === 'string')
+    : []
+  const recorded = manifestKey(manifest)
+
+  let original: Record<string, unknown> | undefined
+  try {
+    const parsed = JSON.parse(readFileSync(join(backupDir, 'profile', 'package.json'), 'utf8')) as unknown
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      original = parsed as Record<string, unknown>
+    }
+  } catch {
+    // 旧备份不一定存了 profile 清单（PROFILE_FILES 后来才补全），不算错。
+  }
+
+  const keys: Record<string, string> = {}
+  for (const block of blocks) {
+    let found: string[] = []
+    if (original !== undefined) {
+      const record = original[block]
+      if (record !== null && typeof record === 'object' && !Array.isArray(record)) {
+        const deps = record as Record<string, unknown>
+        found = KNOWN_PACKAGE_NAMES.filter(name => Object.hasOwn(deps, name))
+      }
+    }
+    if (found.length > 1) {
+      return {
+        keys: {},
+        problem: `备份里 ${block} 同时存在 ${found.join(' 和 ')}，无法判断原来装的是哪一行；`
+          + '请打开备份里的 profile/package.json 确认后手动改回，再重启 DSH',
+      }
+    }
+    // 原清单里没有这一行（旧备份没存清单，或 fork 改了键名）时按记录的名字来。
+    keys[block] = found[0] ?? recorded
+  }
+  if (blocks.length === 0) {
+    return { keys: {}, problem: 'restore.json 里没有记录本插件原来的 spec，无法回退' }
+  }
+  return { keys }
+}
 export interface PreUpdateBackupInfo {
   path: string
   createdAt: string
@@ -406,7 +510,8 @@ export function listPreUpdateBackups(root: string): PreUpdateBackupInfo[] {
     try {
       if (!statSync(path).isDirectory()) continue
       const manifest = JSON.parse(readFileSync(join(path, RESTORE_FILE_NAME), 'utf8')) as Partial<RestoreManifest>
-      if (manifest.package !== PACKAGE) continue
+      // 认旧备份：写死裸名的 fork 建的备份里 package 是 `dsh-xdpool`，那也是本插件的备份。
+      if (!KNOWN_PACKAGE_NAMES.includes(manifestKey(manifest))) continue
       const createdAt = typeof manifest.createdAt === 'string' ? manifest.createdAt : ''
       const parsed = Date.parse(createdAt)
       out.push({
@@ -480,23 +585,41 @@ export function rollbackPackageSpec(backupDir: string): RollbackResult {
   const previousTarball = typeof manifest.previousTarball === 'string' ? manifest.previousTarball : undefined
   // 备份里的旧 .tgz 还在就用它（原 spec 可能指向已被清理的 %TEMP%）。
   const useTarball = rollbackSpec !== undefined && previousTarball !== undefined && existsSync(previousTarball)
+  /**
+   * 写回**原来那一行的键**，而不是当前常量。
+   *
+   * 一个由旧裸名装过来的 profile，回退时写成 `@refeain/dsh-xdpool` 会装出一个它原来没有的
+   * 依赖；反过来，一个 scoped 的 profile 回退成裸名会让 pnpm 去装那个被 deprecate 的错包。
+   * 键从哪里来：新备份记了 previousKeys；旧备份没有这个字段，就从备份里的原 profile 清单
+   * 反推（见 identifyBackup）。判定不出来时**不猜**：把备份列出来，请用户手选。
+   */
+  const identity = identifyBackup(backupDir, manifest)
+  if (identity.problem !== undefined) {
+    return { ok: false, restartRequired: false, error: identity.problem }
+  }
   try {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as Record<string, unknown>
     let written: string | undefined
     for (const block of DEPENDENCY_BLOCKS) {
       const original = (specs as Record<string, unknown>)[block]
       if (typeof original !== 'string') continue
+      const key = identity.keys[block] ?? manifestKey(manifest)
       const current = pkg[block]
       const record: Record<string, unknown> = current !== null && typeof current === 'object' && !Array.isArray(current)
         ? current as Record<string, unknown>
         : {}
       const spec = useTarball && rollbackSpec !== undefined ? rollbackSpec : original
-      record[PACKAGE] = spec
+      /**
+       * 回退是「回到装之前的样子」：更新时迁到规范名的那一行要删掉，原来那行写回去。
+       * 只在规范名和原键不同（确实是迁移过来的）时才删，否则会把刚写的那行删掉。
+       */
+      if (key !== PACKAGE_NAME) delete record[PACKAGE_NAME]
+      record[key] = spec
       pkg[block] = record
       written ??= spec
     }
     if (written === undefined) {
-      return { ok: false, restartRequired: false, error: 'restore.json 里没有记录 dsh-xdpool 原来的 spec，无法回退' }
+      return { ok: false, restartRequired: false, error: 'restore.json 里没有记录本插件原来的 spec，无法回退' }
     }
     writeFileSync(`${pkgPath}.tmp`, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8')
     renameSync(`${pkgPath}.tmp`, pkgPath)

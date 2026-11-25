@@ -33,7 +33,7 @@
 import { POOL_NAV_ICON_MASK_URL } from './nav-icon.ts'
 import { UpdatePanel, type UpdateStatus } from './UpdatePanel.tsx'
 import { POOL_UPDATE_CHECK_PATH } from '../status-paths.ts'
-import { compareVersions } from '../update-check.ts'
+import { compareVersions } from '../version.ts'
 import type { ReactElement } from 'react'
 import { RAIL_ICONS, type RailIconName } from './rail-icons.ts'
 import { initialTheme, otherTheme, rememberTheme, storedTheme, type PoolTheme } from './theme.ts'

@@ -34,6 +34,8 @@ export const en = {
   'channelpool.statAccounts': 'accounts',
   'channelpool.statModels': 'models',
   'channelpool.statCredit': 'credit left',
+  'channelpool.statEnabled': 'enabled',
+  'channelpool.knownOnly': 'known',
 
   'channelpool.autoOn': 'Turn automation on',
   'channelpool.autoOff': 'Turn automation off',
@@ -117,6 +119,9 @@ export const en = {
   'row.checkinDaily': '+{credit} credits/day',
   'row.checkinStreakBonus': 'day {days} bonus +{credit}',
   'row.checkinClaimedReward': 'Claimed +{credit} credits',
+  'row.checkinAlready': 'Already checked in today',
+  'row.checkinBatchClaimed': 'Claimed for {count} accounts',
+  'row.checkinBatchFailed': '{count} failed',
   'row.checkinError': 'Check-in failed: {message}',
   'row.checkinUnavailable': 'check-in unavailable',
   'row.checkinAllHint': 'Collect every account’s daily reward here — no need to switch accounts first.',
@@ -703,6 +708,16 @@ export const en = {
   'channelpool.autoClaimRun': 'Run now',
   'channelpool.autoClaimRunning': 'Running…',
   'channelpool.autoClaimRunHint': 'Run one collection pass now instead of waiting for the scheduled hour',
+  /*
+    The automation panel used to borrow `channelpool.autoClaim` ("Credit automation"),
+    which reads as "this channel's credits, automated". These props are wired to the
+    WorkBuddy scheduler, so the label has to say so — otherwise a reader on a third-party
+    channel believes the switch governs that vendor.
+  */
+  'channelpool.checkinUnknown': 'unknown',
+  'channelpool.checkinUnreadable': 'unreadable',
+  'channelpool.poolAutomation': 'WorkBuddy pool automation',
+  'channelpool.poolAutomationHint': 'Governs the WorkBuddy pool only: check-in covers both regions, while tasks, activities, streaks, travel and compensation run in CN only. Other channels have their own switch on their card.',
   'channelpool.autoEarned': '{credit} credits · {energy} energy · {count} task(s)',
   'channelpool.autoEarnedCredits': '{credit} credits',
   'channelpool.modePrefer': 'Priority',
@@ -788,6 +803,8 @@ export const zh: Record<XdPoolSettingsKey, string> = {
   'channelpool.statAccounts': '账号',
   'channelpool.statModels': '模型',
   'channelpool.statCredit': '剩余积分',
+  'channelpool.statEnabled': '启用',
+  'channelpool.knownOnly': '已知',
 
   'channelpool.autoOn': '开启自动化',
   'channelpool.autoOff': '关闭自动化',
@@ -868,6 +885,9 @@ export const zh: Record<XdPoolSettingsKey, string> = {
   'row.checkinDaily': '每日 +{credit} 积分',
   'row.checkinStreakBonus': '第 {days} 天额外 +{credit}',
   'row.checkinClaimedReward': '已领取 +{credit} 积分',
+  'row.checkinAlready': '今天已经签到过了',
+  'row.checkinBatchClaimed': '已领取 {count} 个账号',
+  'row.checkinBatchFailed': '{count} 个失败',
   'row.checkinError': '签到失败：{message}',
   'row.checkinUnavailable': '签到不可用',
   'row.checkinAllHint': '这里可以为每个账号分别领取每日签到奖励，无需先切换账号。',
@@ -1492,6 +1512,10 @@ export const zh: Record<XdPoolSettingsKey, string> = {
   'channelpool.autoClaimRun': '立即执行',
   'channelpool.autoClaimRunning': '领取中…',
   'channelpool.autoClaimRunHint': '马上跑一轮领取，不用等到预定时间',
+  'channelpool.checkinUnknown': '状态未知',
+  'channelpool.checkinUnreadable': '状态读不到',
+  'channelpool.poolAutomation': 'WorkBuddy 账号池自动化',
+  'channelpool.poolAutomationHint': '只管 WorkBuddy 账号池：签到覆盖国内与国际，任务、活动、连续奖励、出行与补偿只跑国内。其他渠道的自动领取由各自的渠道卡控制。',
   'channelpool.autoEarned': '{credit} 积分 · {energy} 能量 · {count} 个任务',
   'channelpool.autoEarnedCredits': '{credit} 积分',
   'channelpool.modePrefer': '优先',

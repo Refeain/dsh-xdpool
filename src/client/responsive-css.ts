@@ -40,7 +40,10 @@ export const RESPONSIVE_CSS = `
 .app[data-w="narrow"] .ls{padding:3px var(--s2)}
 .app[data-w="narrow"] .ls-v{font-size:13px}
 .app[data-w="narrow"] .list-scroll{display:flex;flex-direction:row;align-items:center;gap:6px;padding:0 var(--s3) var(--s2);overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
-.app[data-w="narrow"] .list-scroll>div{display:contents}
+/* 横滑条里要扁平化的是真正的包裹层；分组标题本身就是 div，必须排除，否则
+   .list-scroll>div 的权重（0,3,1）压过下面 .list-group 的 display:none（0,3,0），
+   标题反而被拆成一个个 flex 项，"已登录"竖排成一列单字（390 实测到）。 */
+.app[data-w="narrow"] .list-scroll>div:not(.list-group){display:contents}
 .app[data-w="narrow"] .list-group{display:none}
 .app[data-w="narrow"] .ch{flex:0 0 auto;width:auto;max-width:180px;padding:4px 10px;min-height:28px;border:1px solid var(--line-2);border-radius:var(--r-pill);display:inline-flex;align-items:center;gap:6px}
 .app[data-w="narrow"] .ch[aria-current="true"]{border-color:transparent;background:var(--accent);color:var(--accent-ink)}
@@ -139,7 +142,8 @@ export const RESPONSIVE_CSS = `
 .app[data-w="phone"] .list{grid-row:1;grid-column:1;min-width:0}
 .app[data-w="phone"] .main{grid-row:2;grid-column:1}
 .app-wide[data-w="phone"] .main{grid-row:1}
-.app[data-w="phone"] .list-scroll>div{display:contents}
+/* 理由同 narrow：分组标题也是 div，那个后代选择器会把它的 display:none 压掉。 */
+.app[data-w="phone"] .list-scroll>div:not(.list-group){display:contents}
 .app[data-w="phone"] .list-stats{flex:0 0 auto;min-width:180px}
 .app[data-w="phone"] .rail-item>span.sw{display:none}
 .app[data-w="phone"] .sec-actions{margin-left:0;width:100%}

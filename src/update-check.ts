@@ -23,15 +23,28 @@
  *
  * @module dsh-xdpool/update-check
  */
-import { POOL_VERSION } from './version.ts'
+import { compareVersions, POOL_VERSION } from './version.ts'
+import { PACKAGE_NAME } from './update-package.ts'
 
-/** The package name this plugin publishes under. */
-const PACKAGE = 'dsh-xdpool'
+/**
+ * Re-exported for the tests and the server-side callers that already import it from here.
+ *
+ * The implementation lives in `version.ts` so the browser bundle can use it without pulling in
+ * `update-package.ts` (which reads `package.json` through `node:fs`). See that function's
+ * comment.
+ */
+export { compareVersions }
 
-/** The registries tried, in order. npm first: it is the canonical one. */
+/**
+ * The registries tried, in order. npm first: it is the canonical one.
+ *
+ * `@refeain/dsh-xdpool` 必须编码成 `@refeain%2Fdsh-xdpool` —— 未编码的斜杠会被 registry
+ * 当成两个路径段，`/@refeain/dsh-xdpool/latest` 是 404，而 `%2F` 那个才是包。这条以前写成
+ * 裸名 `dsh-xdpool`，于是查的根本不是本包。
+ */
 const REGISTRIES = [
-  `https://registry.npmjs.org/${PACKAGE}/latest`,
-  `https://registry.npmjs.org/${PACKAGE}`,
+  `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/latest`,
+  `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}`,
 ]
 
 /** How long an answer is reused. */
@@ -64,36 +77,6 @@ export interface UpdateStatus {
 }
 
 let cached: { at: number; status: UpdateStatus } | undefined
-
-/**
- * Compare two dotted versions.
- *
- * Numeric segments compare as numbers and everything else as text, which is the ordering npm
- * itself uses for the plain `x.y.z` releases this package publishes. A prerelease tag is older
- * than its release (`2.7.3-rc.1 < 2.7.3`), which is what the `-` check below states.
- */
-export function compareVersions(left: string, right: string): number {
-  const parse = (value: string): { parts: number[]; pre: string } => {
-    const [core, ...rest] = value.trim().replace(/^v/u, '').split('-')
-    const parts = (core ?? '').split('.').map(segment => {
-      const number = Number.parseInt(segment, 10)
-      return Number.isFinite(number) ? number : 0
-    })
-    return { parts, pre: rest.join('-') }
-  }
-  const a = parse(left)
-  const b = parse(right)
-  const length = Math.max(a.parts.length, b.parts.length)
-  for (let i = 0; i < length; i += 1) {
-    const left1 = a.parts[i] ?? 0
-    const right1 = b.parts[i] ?? 0
-    if (left1 !== right1) return left1 < right1 ? -1 : 1
-  }
-  // Same numbers: a prerelease is older than the release it precedes.
-  if (a.pre === '' && b.pre !== '') return 1
-  if (a.pre !== '' && b.pre === '') return -1
-  return a.pre === b.pre ? 0 : (a.pre < b.pre ? -1 : 1)
-}
 
 /** Read `dist-tags.latest`, its publish time and the README from a registry document. */
 function parseRegistry(body: unknown): { latest?: string; publishedAt?: string; readme?: string } {

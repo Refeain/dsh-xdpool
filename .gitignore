@@ -28,6 +28,10 @@ _release-*.md
 # 待处理的截图暂存
 .shot-*.png
 
+# 一次性的构建/布局验证临时目录（TMP 重定向与探针 bundle 输出）
+.tmpbuild/
+.layout-tmp/
+
 # Local deployment backups of lib/ (never commit these)
 _backup-lib-*/
 

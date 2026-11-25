@@ -570,10 +570,18 @@ export function creditStatusesFrom(envelope: ChannelRpcEnvelope): readonly Chann
     const status = (entry as { status?: unknown }).status
     const statusRow = status !== null && typeof status === 'object' ? status as Record<string, unknown> : undefined
     const todayCredit = statusRow?.['todayCredit']
+    /*
+      交接文档 4.4：「creditStatusesFrom 保留显式 true 和 false，缺失保持未知」。
+      3.2.0 写的是 `=== true ? {todayCheckedIn:true} : {}` —— 于是 `false`（问到了、
+      确实没签）被当成"没有这个字段"，落到视图里就是"未知"。后果是第三方渠道
+      明明回答"今天没签到"，界面却显示未知，批量也因此不敢提交。
+      这里只在字段真的是 boolean 时才写；缺失/字符串/别的类型仍然算未知。
+    */
+    const checkedIn = statusRow?.['todayCheckedIn']
     rows.push({
       accountId,
       ...typeof nickname === 'string' && nickname !== '' ? { nickname } : {},
-      ...statusRow?.['todayCheckedIn'] === true ? { todayCheckedIn: true } : {},
+      ...typeof checkedIn === 'boolean' ? { todayCheckedIn: checkedIn } : {},
       ...typeof todayCredit === 'number' && Number.isFinite(todayCredit) ? { todayCredit } : {},
     })
   }

@@ -57,15 +57,19 @@
  * @module dsh-xdpool/update-install
  */
 import { spawn } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { checkForUpdate } from './update-check.ts'
 import { backupBeforeUpdate, DEPENDENCY_BLOCKS, preUpdateRoot, pruneOldBackups } from './pre-update-backup.ts'
 import { POOL_VERSION } from './version.ts'
-
-/** The package this plugin publishes under. */
-const PACKAGE = 'dsh-xdpool'
+import {
+  fallbackTarballUrl,
+  KNOWN_PACKAGE_NAMES,
+  PACKAGE_NAME,
+  packageFileStem,
+  parseVersionMetadata,
+} from './update-package.ts'
 
 /** The profile directory whose `package.json` names this plugin. */
 function profileDir(): string | undefined {
@@ -186,6 +190,29 @@ function readProfilePackage(pkgPath: string): { pkg: Record<string, unknown> } |
 }
 
 /**
+ * 某个版本 tarball 的真实地址。
+ *
+ * 读 `/@refeain%2Fdsh-xdpool/<version>` 的 `dist.tarball`；读不到（网络失败、代理返回 HTML、
+ * 版本元数据异常）时退回保底地址。**不**在这里把一个读不到当失败 —— 下载那一步会给出
+ * 明确的 HTTP 状态，比「读元数据失败」更好诊断。
+ */
+export async function resolveTarballUrl(version: string): Promise<string> {
+  try {
+    const response = await fetch(
+      `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/${encodeURIComponent(version)}`,
+      { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(8_000) },
+    )
+    if (response.ok) {
+      const meta = parseVersionMetadata(await response.json())
+      if (meta !== undefined) return meta.tarball
+    }
+  } catch {
+    // 落到保底地址。
+  }
+  return fallbackTarballUrl(version)
+}
+
+/**
  * Download a version and point the profile at it.
  *
  * The order matters, and it is the order the panel draws:
@@ -214,12 +241,27 @@ export async function installVersion(version: string): Promise<InstallResult> {
   if (profile === undefined) {
     return failed('找不到插件所在的 profile 目录，无法自动更新；请在 DSH 的插件设置里更新')
   }
-  const target = join(tmpdir(), `${PACKAGE}-${version}.tgz`)
+  /**
+   * 临时文件必须独占：两个更新同时开始（或上一次的残留）会互相覆盖同一个 `.part`，
+   * 结果是一个谁也没完整写过的 tar 包被当成新版本装上。mkdtemp 给出唯一目录，
+   * 文件名只保留安全字符（scoped 包名里的 `/` 会造出不存在的子目录）。
+   */
+  const staging = mkdtempSync(join(tmpdir(), 'xdpool-update-'))
+  const target = join(staging, `${packageFileStem()}-${version}.tgz`)
   const partial = `${target}.part`
 
   // 1. 下载
   try {
-    const response = await fetch(`https://registry.npmjs.org/${PACKAGE}/-/${PACKAGE}-${version}.tgz`, {
+    /**
+     * 先读这个版本的元数据，用其中的 `dist.tarball`。
+     *
+     * 拼地址的时代留下了两个坑：裸名 `dsh-xdpool` 指向的是另一个包；scoped 包的 tarball
+     * 文件名不带 scope，凭名字猜很容易拼错。registry 自己给出的地址是唯一可信的那份，
+     * 镜像 / 私有 registry 也会给出不同形状。读不到元数据时才退回约定的保底地址 —— 那是
+     * 一个仍然正确、只是可能被镜像改写过的地址。
+     */
+    const tarballUrl = await resolveTarballUrl(version)
+    const response = await fetch(tarballUrl, {
       signal: AbortSignal.timeout(120_000),
     })
     if (!response.ok || response.body === null) {
@@ -283,24 +325,40 @@ export async function installVersion(version: string): Promise<InstallResult> {
     return failed(read.error, { path: target })
   }
   const pkg = read.pkg
+  /**
+   * 在 profile 里找到本插件是哪一行的键。
+   *
+   * 现在的发布身份优先；找不到时退到旧裸名 —— 早期由写死裸名的 fork 安装过的 profile，那一行
+   * 就叫 `dsh-xdpool`，不认它就没法从那个状态升上来。**同一依赖块里两个键同时存在**
+   * 是历史误装的痕迹，此时不猜：两个都改会让回退说不清恢复成哪一行，直接报出需要人工处理。
+   */
+  const keysByBlock = resolveDependencyKeys(pkg)
+  if ('conflict' in keysByBlock) {
+    steps.push({ id: 'write', ok: false, detail: keysByBlock.conflict })
+    return failed(keysByBlock.conflict, { path: target })
+  }
   const previousSpecs: Record<string, string> = {}
   for (const block of DEPENDENCY_BLOCKS) {
+    const key = keysByBlock.keys[block]
+    if (key === undefined) continue
     const record = pkg[block]
     if (record === null || typeof record !== 'object' || Array.isArray(record)) continue
-    const deps = record as Record<string, unknown>
-    if (!Object.hasOwn(deps, PACKAGE)) continue
-    const spec = deps[PACKAGE]
+    const spec = (record as Record<string, unknown>)[key]
     previousSpecs[block] = typeof spec === 'string' ? spec : JSON.stringify(spec)
   }
   if (Object.keys(previousSpecs).length === 0) {
-    steps.push({ id: 'write', ok: false, detail: `package.json 里没有 ${PACKAGE}` })
-    return failed(`profile 的 package.json 里没有 ${PACKAGE}，无法自动更新`, { path: target })
+    steps.push({ id: 'write', ok: false, detail: `package.json 里没有 ${PACKAGE_NAME}` })
+    return failed(`profile 的 package.json 里没有 ${PACKAGE_NAME}，无法自动更新`, { path: target })
   }
   const backup = backupBeforeUpdate({
     profileDir: profile,
     previousVersion,
     targetVersion: version,
     previousSpecs,
+    // 记下每一块原来用的是哪个键（可能是旧裸名），回退要写回同一行。
+    previousKeys: Object.fromEntries(
+      Object.entries(keysByBlock.keys).filter((entry): entry is [string, string] => entry[1] !== undefined),
+    ),
     newSpec,
   })
   if (!backup.ok || backup.path === undefined) {
@@ -315,10 +373,25 @@ export async function installVersion(version: string): Promise<InstallResult> {
 
   // 4. 写入 package.json —— staged through a sibling temp file, so a crash cannot leave the
   // profile with half a manifest (the backup holds the original either way).
+  //
+  // 恢复边界（交接文档 5.3）：只改回 package.json 是不够的 —— pnpm-lock.yaml 可能已经被
+  // pnpm 写过一半，node_modules 也可能部分换过。所以先把锁文件的内容与存在性也记下来，
+  // 同步失败（返回失败**或抛异常**）都走同一条恢复路径，并分别记录每一处的恢复结果。
+  const lockPath = join(profile, 'pnpm-lock.yaml')
+  const lockBefore = snapshotFile(lockPath)
   try {
+    /**
+     * 写入规范包名，并把旧裸名那一行删掉。
+     *
+     * 只加不改是不够的：一个由旧 fork 装过的 profile 里留着 `dsh-xdpool` 那一行，再加一行
+     * `@refeain/dsh-xdpool`，pnpm 会当成两个包各装一份 —— 一个是被 deprecate 的错包。
+     * 旧键的原值已经记在 previousSpecs 里，回退时按它写回，所以这里删得掉也回得去。
+     */
     for (const block of Object.keys(previousSpecs)) {
       const deps = pkg[block] as Record<string, unknown>
-      deps[PACKAGE] = newSpec
+      const legacy = keysByBlock.keys[block]
+      if (legacy !== undefined && legacy !== PACKAGE_NAME) delete deps[legacy]
+      deps[PACKAGE_NAME] = newSpec
     }
     writeFileSync(`${pkgPath}.tmp`, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8')
     renameSync(`${pkgPath}.tmp`, pkgPath)
@@ -329,19 +402,147 @@ export async function installVersion(version: string): Promise<InstallResult> {
      * 以前只到上一行就返回成功，DSH 下次启动按旧 lockfile 装回旧版，版本号从不变化。
      * 同步失败就回滚，宁可这次没更新，也不留下会触发宿主 repair 的半更新 profile。
      */
-    const synced = await syncImplementation(profile)
+    let synced: { ok: boolean; detail: string }
+    let syncThrew: unknown
+    try {
+      synced = await syncImplementation(profile)
+    } catch (error: unknown) {
+      // 钩子自己抛异常也是失败 —— 以前这个分支直接落到外层 catch，只报了「写入失败」，
+      // 却没恢复已经改过的 package.json 与锁文件。
+      syncThrew = error
+      synced = { ok: false, detail: error instanceof Error ? error.message : String(error) }
+    }
     if (!synced.ok) {
-      writeFileSync(`${pkgPath}.tmp`, originalManifest, 'utf8')
-      renameSync(`${pkgPath}.tmp`, pkgPath)
-      steps.push({ id: 'write', ok: false, detail: `pnpm 同步失败，已回滚：${synced.detail}` })
-      return failed(`安装依赖失败，已回滚，插件和数据都没有改动：${synced.detail}`, { path: target, backupPath })
+      const recovery = await recoverProfile({ pkgPath, originalManifest, lockPath, lockBefore, profile })
+      const detail = syncThrew === undefined ? synced.detail : `同步钩子抛出异常：${synced.detail}`
+      steps.push({ id: 'write', ok: false, detail: recovery.summary })
+      if (!recovery.filesRestored) {
+        // 文件都没恢复：不能说「没有改动」，把没恢复的部分和修复入口一起交出来。
+        return failed(
+          `安装依赖失败（${detail}），且回滚未完成。${recovery.summary}。`
+            + `profile 的备份在 ${backupPath}（restore.json 记着原 spec），可据此手动修复`,
+          { path: target, backupPath },
+        )
+      }
+      return failed(
+        `安装依赖失败，已回滚，插件和数据都没有改动：${detail}`,
+        { path: target, backupPath },
+      )
     }
     steps.push({ id: 'sync', ok: true, detail: synced.detail })
     return { ok: true, version, path: target, restartRequired: true, backupPath, previousVersion, steps }
   } catch (error: unknown) {
-    steps.push({ id: 'write', ok: false, detail: error instanceof Error ? error.message : String(error) })
-    return failed(chineseFailure('写入 profile 的 package.json 失败', error), { path: target, backupPath })
+    // 写文件本身失败（磁盘满、权限、进程被杀）时也可能已经动过锁文件。
+    const recovery = await recoverProfile({ pkgPath, originalManifest, lockPath, lockBefore, profile })
+    const reason = chineseFailure('写入 profile 的 package.json 失败', error)
+    steps.push({ id: 'write', ok: false, detail: `${reason}；${recovery.summary}` })
+    if (!recovery.filesRestored) {
+      return failed(
+        `${reason}，且回滚未完成。${recovery.summary}。备份在 ${backupPath}（restore.json 记着原 spec）`,
+        { path: target, backupPath },
+      )
+    }
+    return failed(`${reason}，已回滚：${recovery.summary}`, { path: target, backupPath })
   }
+}
+
+/**
+ * 一个文件在改动前的样子：内容 + 存不存在。
+ *
+ * 只记内容不够 —— 原来没有这个文件、更新造出一个，回滚时就得删掉它，而不是写回空字符串。
+ */
+interface FileSnapshot {
+  existed: boolean
+  content?: string
+}
+
+/** 读一个文件的内容与存在性；读不出来当「不存在」，恢复时按不存在处理。 */
+function snapshotFile(path: string): FileSnapshot {
+  try {
+    return { existed: true, content: readFileSync(path, 'utf8') }
+  } catch {
+    return { existed: false }
+  }
+}
+
+/** 把文件恢复成快照里的样子：原来有就写回原内容，原来没有就删掉。 */
+function restoreFile(path: string, snapshot: FileSnapshot): { ok: boolean; detail?: string } {
+  try {
+    if (snapshot.existed) {
+      writeFileSync(`${path}.tmp`, snapshot.content ?? '', 'utf8')
+      renameSync(`${path}.tmp`, path)
+    } else {
+      rmSync(path, { force: true })
+    }
+    return { ok: true }
+  } catch (error: unknown) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+interface RecoverOptions {
+  pkgPath: string
+  originalManifest: string
+  lockPath: string
+  lockBefore: FileSnapshot
+  profile: string
+}
+
+/**
+ * 把 profile 恢复成更新前的样子，并如实报告结果。
+ *
+ * 恢复的是**可证明的那部分状态**：package.json 与锁文件的字节。顺序有理由 —— 先写回清单
+ * （它是「安装了什么」的唯一声明），再写回锁文件（它决定下次启动装哪一版）。
+ *
+ * **不在这里重跑 pnpm 同步**，这一条是踩出来的：
+ *   - 同步刚刚失败过，立刻重跑多半还是同一个原因（权限、占用、磁盘），只是让失败慢一倍；
+ *   - 更糟的是它会**重新造出刚被删掉的文件** —— 更新前没有锁文件的 profile，恢复时删掉
+ *     半成品锁文件，重跑同步又写回来，于是「回滚」之后仍留着一份来路不明的锁文件；
+ *   - node_modules 的字节本来就不在可证明范围里，凭重跑来断言「依赖也回去了」是空头承诺。
+ *
+ * 下次 DSH 启动会按写回的锁文件重建依赖，那时状态自然一致。所以这里只承诺文件级恢复，
+ * 并把 node_modules 的实际处境讲清楚，不假装它也是干净的。
+ */
+async function recoverProfile(options: RecoverOptions): Promise<{ filesRestored: boolean; summary: string }> {
+  const notes: string[] = []
+  let filesRestored = true
+
+  const manifest = restoreFile(options.pkgPath, { existed: true, content: options.originalManifest })
+  if (manifest.ok) notes.push('package.json 已写回')
+  else { filesRestored = false; notes.push(`package.json 写回失败（${manifest.detail ?? '未知原因'}）`) }
+
+  const lock = restoreFile(options.lockPath, options.lockBefore)
+  if (lock.ok) notes.push(options.lockBefore.existed ? 'pnpm-lock.yaml 已写回' : 'pnpm-lock.yaml 已删除（更新前没有）')
+  else { filesRestored = false; notes.push(`pnpm-lock.yaml 恢复失败（${lock.detail ?? '未知原因'}）`) }
+
+  return { filesRestored, summary: notes.join('；') }
+}
+
+/**
+ * 在 profile 里找出本插件出现在哪些依赖块、用什么键。
+ *
+ * 返回的 `keys` 是「依赖块 -> 键名」。旧的裸名 profile 会给出 `dsh-xdpool`；同一块里同时
+ * 出现两个键时返回 `conflict` —— 那是历史误装，两个都改会让回退说不清，必须人工选。
+ */
+export function resolveDependencyKeys(pkg: Record<string, unknown>): {
+  keys: Record<string, string | undefined>
+} | { conflict: string } {
+  const keys: Record<string, string | undefined> = {}
+  for (const block of DEPENDENCY_BLOCKS) {
+    const record = pkg[block]
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) continue
+    const deps = record as Record<string, unknown>
+    const present = KNOWN_PACKAGE_NAMES.filter(name => Object.hasOwn(deps, name))
+    if (present.length > 1) {
+      return {
+        conflict: `profile 的 ${block} 里同时存在 ${KNOWN_PACKAGE_NAMES.join(' 和 ')}，`
+          + '无法判断该更新哪一行；请先手动保留一个再更新',
+      }
+    }
+    const only = present[0]
+    if (only !== undefined) keys[block] = only
+  }
+  return { keys }
 }
 
 /**

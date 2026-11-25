@@ -21,7 +21,7 @@ import {
 } from './status-paths.ts'
 import { originTrusted, type TrustedHosts } from './origin-trust.ts'
 import { browserLogin } from './marvis-login.ts'
-import { deviceGuid } from './marvis-device.ts'
+import { DeviceIdUnavailableError, deviceGuid, deviceIdentity } from './marvis-device.ts'
 import { exchangeCode, extractCode } from './marvis-session.ts'
 import { readMarvisAccounts, removeAllMarvisAccounts, removeMarvisAccount, saveMarvisAccount } from './marvis-store.ts'
 import { marvisWallet } from './marvis-upstream.ts'
@@ -65,6 +65,16 @@ export function registerMarvisRoutes(ctx: Context, deps: MarvisRouteOptions): vo
   ctx.effect(() => {
     const trust = (req: IncomingMessage): boolean => originTrusted(req, deps.trustedHosts?.() ?? [])
 
+    /**
+     * The device id a sign-in needs, as a throw that both routes already answer with a reason.
+     *
+     * Both sign-in handlers end in `json(res, 200, { ok: false, reason: … })`, so letting this
+     * throw is the shortest path from "no device" to a sentence the user can act on. Calling
+     * `deviceGuid()` directly would have done the same thing here; the named helper exists so
+     * the two call sites cannot drift into one throwing and one swallowing.
+     */
+    const requireGuid = (): string => deviceGuid()
+
     /** The session: what is stored, and how to forget it. */
     const disposeSession = ctx.webServer.register({
       kind: 'exact',
@@ -82,13 +92,24 @@ export function registerMarvisRoutes(ctx: Context, deps: MarvisRouteOptions): vo
           }
           if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
           const accounts = await deps.accounts()
+          /*
+            The device id is REPORTED, not required (F7).
+
+            `deviceGuid()` throws when there is no stable input. On this route that turned
+            "this machine has no device" into a blank 500 on the very page that is supposed to
+            explain why Marvis cannot sign in. The id is only ever shown for a support thread to
+            compare, so the route answers without it and says what went wrong instead.
+          */
+          const device = deviceIdentity()
           return json(res, 200, {
             ok: true,
             signedIn: accounts.length > 0,
             accounts,
             models: MARVIS_MODELS.map(model => ({ id: model.id, name: model.name })),
             /** The device this machine presents; shown so a support thread can compare. */
-            guid: deviceGuid(),
+            ...device.ok ? { guid: device.guid, deviceSource: device.source } : {},
+            /** Why there is no id, when there is none — the diagnosable half of F7. */
+            ...device.ok ? {} : { deviceProblem: device.problem },
           })
         } catch (error: unknown) {
           return json(res, 500, { error: messageOf(error) })
@@ -113,7 +134,7 @@ export function registerMarvisRoutes(ctx: Context, deps: MarvisRouteOptions): vo
           const account = await exchangeCode({
             code: result.code,
             loginType,
-            guid: deviceGuid(),
+            guid: requireGuid(),
             ...(result.state === undefined ? {} : { state: result.state }),
           })
           await saveMarvisAccount(account)
@@ -158,7 +179,7 @@ export function registerMarvisRoutes(ctx: Context, deps: MarvisRouteOptions): vo
           const account = await exchangeCode({
             code,
             loginType,
-            guid: deviceGuid(),
+            guid: requireGuid(),
             ...(state === undefined ? {} : { state }),
           })
           await saveMarvisAccount(account)
