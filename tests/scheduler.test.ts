@@ -21,6 +21,7 @@ import { describe, expect, it } from 'vitest'
 import { WorkBuddyAccountPool } from '../src/accounts.ts'
 import type { WorkBuddyCredential } from '../src/accounts.ts'
 import { AUTOMATION_JOB_KINDS, WorkBuddyScheduler, dayKey, isFireHour, slotKey } from '../src/scheduler.ts'
+import type { AutomationAccountEarnings, AutomationLedger } from '../src/scheduler.ts'
 import type { WorkBuddyTask, WorkBuddyUpstreamClient } from '../src/upstream.ts'
 
 /**
@@ -1222,6 +1223,87 @@ describe('outage compensation', () => {
     const scheduler = build(pool, upstream)
     await scheduler.runAll()
     expect(upstream.calls).not.toContain('compensationClaim')
+  })
+})
+
+describe('earnings ledger day filtering', () => {
+  /**
+   * A persisted ledger can pair today's top-level date with rows from an
+   * earlier run: the document's `date` is rewritten from the in-memory set, so a
+   * partial write leaves the header fresh and the rows stale. Reading only the
+   * header presented last week's credits as today's -- the panel summed 640
+   * while the accounts had actually earned 400 that day.
+   */
+  const when = beijing(2026, 8, 7, 11, 0, 0)
+  const today = dayKey(when)
+
+  function row(date: string, checkinCredit: number): AutomationAccountEarnings {
+    return {
+      credit: 0,
+      energy: 0,
+      claimed: 0,
+      checkinCredit,
+      bonusCredit: 0,
+      travelCredit: 0,
+      compensationCredit: 0,
+      date,
+    }
+  }
+
+  function build(
+    pool: WorkBuddyAccountPool,
+    upstream: FakeUpstream,
+    ledger?: AutomationLedger,
+  ): WorkBuddyScheduler {
+    return new WorkBuddyScheduler(pool, upstream.client, {
+      enabled: true,
+      checkinHours: [],
+      reportHours: [],
+      taskHours: [],
+      streakHours: [],
+      travelHours: [],
+      compensationHours: [],
+      accountDelayMs: 0,
+      eventScoreWaitMs: 0,
+      expertGapMs: 0,
+      now: () => when,
+      logger: {},
+      ...ledger === undefined ? {} : { loadEarnings: () => ledger },
+    })
+  }
+
+  it('drops a stale row restored from a document dated today', async () => {
+    const { pool, upstream } = await harness(1)
+    const id = pool.list()[0]!.id
+    const scheduler = build(pool, upstream, {
+      date: today,
+      accounts: { [id]: row('2026-08-01', 900) },
+    })
+    expect(scheduler.status().earningsToday[id]).toBeUndefined()
+  })
+
+  it('keeps a row whose own date is today', async () => {
+    // The guard has to be a filter, not a blanket refusal: throwing away the
+    // whole document would lose the credits the automation earned this morning.
+    const { pool, upstream } = await harness(1)
+    const id = pool.list()[0]!.id
+    const scheduler = build(pool, upstream, {
+      date: today,
+      accounts: { [id]: row(today, 100) },
+    })
+    expect(scheduler.status().earningsToday[id]?.checkinCredit).toBe(100)
+  })
+
+  it('applies the same guard when the ledger arrives after construction', async () => {
+    // The settings document becomes readable only after the scheduler exists,
+    // so this path -- not the constructor -- is the one a real host takes.
+    const { pool, upstream } = await harness(1)
+    const id = pool.list()[0]!.id
+    const scheduler = build(pool, upstream)
+    scheduler.applyEarningsLedger({ date: today, accounts: { [id]: row('2026-08-01', 900) } })
+    expect(scheduler.status().earningsToday[id]).toBeUndefined()
+    scheduler.applyEarningsLedger({ date: today, accounts: { [id]: row(today, 100) } })
+    expect(scheduler.status().earningsToday[id]?.checkinCredit).toBe(100)
   })
 })
 

@@ -214,6 +214,53 @@ const FAILURE_LINES_SHOWN = 2
  * Past `FAILURE_LINES_SHOWN` the remainder collapses to `+N`: the count still
  * says how widespread the failure is without reproducing every message.
  */
+/**
+ * Today's total take from the automation, as one line.
+ *
+ * `undefined` when nothing has been earned yet -- the panel then shows only the
+ * switch and the claim count, exactly as before. A zero line would be a claim
+ * nobody made: "the automation got 0" reads as a failure, while "it has not run
+ * yet" is the honest answer, and the absent row says that.
+ *
+ * Summed across all six passes because the user's question is "how much did I
+ * get today", not "which pass paid". The per-source breakdown stays in the data
+ * (`checkinCredit` / `travelCredit` / ...) for anything that wants it.
+ *
+ * Every entry carries its own `date`; rows dated before today are skipped rather
+ * than summed. A persisted ledger can hold them -- the scheduler now drops them
+ * on restore, but a document written by an older build is still on disk, and
+ * summing it would report last week's credits as today's.
+ */
+function automationEarnedToday(
+  status: PoolWebStatus | undefined,
+  t?: PoolCardProps['t'],
+): string | undefined {
+  const today = status?.automation?.earningsToday
+  if (today === undefined) return undefined
+  let credit = 0
+  let energy = 0
+  let claimed = 0
+  let sawToday = false
+  for (const entry of Object.values(today)) {
+    if (entry.date !== dayKeyOfToday()) continue
+    sawToday = true
+    credit += entry.credit + entry.checkinCredit + entry.bonusCredit
+      + entry.travelCredit + entry.compensationCredit
+    energy += entry.energy
+    claimed += entry.claimed
+  }
+  if (!sawToday) return undefined
+  if (credit === 0 && energy === 0 && claimed === 0) return undefined
+  return t?.('channelpool.autoEarned', { credit, energy, count: claimed })
+    ?? `${String(credit)} credits · ${String(energy)} energy · ${String(claimed)} task(s)`
+}
+/** Local calendar day, matching the `YYYY-MM-DD` keys the scheduler writes. */
+function dayKeyOfToday(): string {
+  const now = new Date()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${String(now.getFullYear())}-${month}-${day}`
+}
 function automationFailures(status: PoolWebStatus | undefined): string | undefined {
   const lines = automationJobs(status)
     .flatMap(job => job.failures ?? [])
@@ -1689,6 +1736,7 @@ export function PoolCard({ t, settingsScope }: PoolCardProps) {
                 onAutoClaimRun={() => { void runAutomationJob('cn') }}
                 autoClaimReport={automationFailures(statusOf('cn'))}
                 autoClaimFailing={automationJobs(statusOf('cn')).some(job => job.failed > 0)}
+                autoClaimEarned={automationEarnedToday(statusOf('cn'), t)}
                 /*
                   提示条放进详情列的 mbody 里。之前它们是 .app 网格的直接子元素，
                   一出现就占一个格子，把三列挤乱。

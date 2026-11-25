@@ -664,7 +664,14 @@ export class WorkBuddyScheduler {
     const restored = options.loadEarnings?.()
     const today = dayKey(this.now())
     if (restored !== undefined && restored.date === today) {
-      for (const [id, entry] of Object.entries(restored.accounts)) this.earnings.set(id, entry)
+      for (const [id, entry] of Object.entries(restored.accounts)) {
+        // Per-entry day check, not just the document's. A document can carry rows
+        // dated earlier: the top-level `date` is rewritten from the in-memory set,
+        // which a partial write can leave holding rows from a previous run. Taking
+        // those rows would present last week's credits as today's.
+        if (entry.date !== today) continue
+        this.earnings.set(id, entry)
+      }
       this.earningsDate = today
     }
     this.enabled = options.enabled ?? false
@@ -718,7 +725,13 @@ export class WorkBuddyScheduler {
   applyEarningsLedger(ledger: AutomationLedger): void {
     const today = dayKey(this.now())
     if (ledger.date !== today) return
-    for (const [id, entry] of Object.entries(ledger.accounts)) this.earnings.set(id, entry)
+    for (const [id, entry] of Object.entries(ledger.accounts)) {
+      // Same per-entry guard as the constructor: the document's own date is not
+      // enough. A row dated before today counts as zero for today, so it is
+      // skipped rather than adopted.
+      if (entry.date !== today) continue
+      this.earnings.set(id, entry)
+    }
     this.earningsDate = today
   }
 

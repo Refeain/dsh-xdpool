@@ -1251,7 +1251,7 @@ async function fetchOwnSession(channel: string): Promise<
  * `active` 为空时（首次进入、或选中的渠道被移除）退回第一家，这样右栏
  * 永远不会是空的。
  */
-export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoClaimBusy, onAutoClaim, autoClaimRunning, onAutoClaimRun, autoClaimReport, autoClaimFailing, banner, regionCards }: {
+export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoClaimBusy, onAutoClaim, autoClaimRunning, onAutoClaimRun, autoClaimReport, autoClaimFailing, autoClaimEarned, banner, regionCards }: {
   readonly t?: Translate | undefined
   /** 中栏选中的渠道 id；空则显示第一家。 */
   readonly active?: string | undefined
@@ -1276,6 +1276,17 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
   readonly autoClaimReport?: string | undefined
   /** 最近一轮里有没有账号失败 —— 决定上面那行用警示色还是普通色。 */
   readonly autoClaimFailing?: boolean | undefined
+  /**
+   * 今天到目前为止真的落进账的积分/能量/任务数，一行读完。
+   *
+   * 和上面的「今日已领 N/M」分工不同：那个数的是「几个账号签到成功了」，
+   * 回答不了「一共拿到多少分」。签到只是六个 pass 里的一个，任务、连签、
+   * 旅行、补偿都给分，只盯签到会把大部分收益漏掉。
+   *
+   * 未定义 = 今天还没有任何进账（自动化没跑过，或跑过但一分没拿）。
+   * 不写成「0 积分」：那读起来像故障，而实际只是还没开始。
+   */
+  readonly autoClaimEarned?: string | undefined
   /** 外层的提示条，放进详情列 mbody 顶部（不能落在 .app 网格里）。 */
   readonly banner?: ReactNode | undefined
   /**
@@ -3004,6 +3015,9 @@ export function ChannelPoolSection({ t, active, onAddAccount, autoClaim, autoCla
                 >
                   {autoClaimReport}
                 </span>
+              )}
+              {autoClaimEarned === undefined ? null : (
+                <span className="sum-sub">{autoClaimEarned}</span>
               )}
             </div>
           )}
