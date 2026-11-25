@@ -1784,9 +1784,18 @@ export function registerPoolStatusRoute(ctx: Context, deps: PoolStatusRouteOptio
         try {
           return json(res, 200, await updateToLatest())
         } catch (error: unknown) {
-          // updateToLatest 自己的失败都已经是中文；这里只兜底它没预料到的异常，同样给中文，
-          // 并说明数据没动 —— 抛出发生在改 package.json 之前（它是最后一步）。
-          return json(res, 200, { ok: false, restartRequired: false, error: `更新失败（${safeMessage(error)}），插件和数据都没有改动` })
+          /**
+           * updateToLatest 自己的失败都已经是中文，到这里说明是它没预料到的异常。
+           *
+           * 不能说「插件和数据都没有改动」：写入 package.json 之后还有同步依赖这一步，
+           * 异常可能发生在它之后，那时清单与锁文件确实已经被改过。只报事实 + 出路。
+           */
+          return json(res, 200, {
+            ok: false,
+            restartRequired: false,
+            error: `更新失败（${safeMessage(error)}）。无法确认 profile 当前状态，请重启 DSH 让宿主按现有清单重建依赖，`
+              + '再回到这里看版本号是否已变。',
+          })
         }
       },
     })

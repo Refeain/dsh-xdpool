@@ -59,7 +59,7 @@
 import { spawn } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { checkForUpdate } from './update-check.ts'
 import { backupBeforeUpdate, DEPENDENCY_BLOCKS, preUpdateRoot, pruneOldBackups } from './pre-update-backup.ts'
 import { POOL_VERSION } from './version.ts'
@@ -227,6 +227,55 @@ export async function resolveTarballUrl(version: string): Promise<string> {
  * A failure at any step leaves the working install and its data exactly as they were.
  */
 export async function installVersion(version: string): Promise<InstallResult> {
+  const profile = profileDir()
+  if (profile === undefined) {
+    return {
+      ok: false,
+      restartRequired: false,
+      previousVersion: POOL_VERSION,
+      error: '找不到插件所在的 profile 目录，无法自动更新；请在 DSH 的插件设置里更新',
+    }
+  }
+  /**
+   * 同一个 profile 的更新合并成一次。
+   *
+   * `POST /plugins/dsh-xdpool/update` 是并发的 HTTP 入口：界面上那个 busy 只存在于某一个
+   * 浏览器标签里，拦不住第二个标签、另一台机器、或者脚本连发两次。两个 installVersion
+   * 同时跑同一个 profile 会互相踩 —— 双方都读到旧清单、各建一份备份、后成的那次把
+   * node_modules 与 lockfile 交错写。这里让后来者直接等前一次的结果：
+   * 一次更新只产生一份备份，写入与同步也不会交错。
+   *
+   * 队列里只留「正在进行的那一次」；结束即删，进程闲置时不留状态。
+   */
+  return await coalesceByProfile(profile, () => installIntoProfile(profile, version))
+}
+
+/** profile 目录（已归一化的绝对路径）→ 正在进行的更新。 */
+const inFlightInstalls = new Map<string, Promise<InstallResult>>()
+
+async function coalesceByProfile(
+  profile: string,
+  run: () => Promise<InstallResult>,
+): Promise<InstallResult> {
+  /**
+   * 键要归一化。Windows 的文件系统不区分大小写，同一个 profile 在两个请求里可能一个写
+   * `C:\Users\…\Desktop`、另一个写 `c:\users\…\desktop` —— 不折叠就把它们当成两个 profile，
+   * 于是互斥形同虚设。
+   */
+  const absolute = resolve(profile)
+  const key = process.platform === 'win32' ? absolute.toLowerCase() : absolute
+  const running = inFlightInstalls.get(key)
+  if (running !== undefined) return await running
+  let started: Promise<InstallResult>
+  started = run().finally(() => {
+    if (inFlightInstalls.get(key) === started) inFlightInstalls.delete(key)
+  })
+  inFlightInstalls.set(key, started)
+  return await started
+}
+
+/** 真正做一次更新；只在 `coalesceByProfile` 的独占窗口里被调用。 */
+async function installIntoProfile(profile: string, version: string): Promise<InstallResult> {
   const previousVersion = POOL_VERSION
   const steps: InstallStep[] = []
   const failed = (error: string, extra: { path?: string; backupPath?: string } = {}): InstallResult => ({
@@ -237,10 +286,6 @@ export async function installVersion(version: string): Promise<InstallResult> {
     error,
     ...extra,
   })
-  const profile = profileDir()
-  if (profile === undefined) {
-    return failed('找不到插件所在的 profile 目录，无法自动更新；请在 DSH 的插件设置里更新')
-  }
   /**
    * 临时文件必须独占：两个更新同时开始（或上一次的残留）会互相覆盖同一个 `.part`，
    * 结果是一个谁也没完整写过的 tar 包被当成新版本装上。mkdtemp 给出唯一目录，
@@ -350,6 +395,25 @@ export async function installVersion(version: string): Promise<InstallResult> {
     steps.push({ id: 'write', ok: false, detail: `package.json 里没有 ${PACKAGE_NAME}` })
     return failed(`profile 的 package.json 里没有 ${PACKAGE_NAME}，无法自动更新`, { path: target })
   }
+  /**
+   * 锁文件的快照必须在**任何东西被创建之前**取，并且读不出来就立刻停下。
+   *
+   * 两个理由：
+   *   1. 快照是恢复阶段唯一的依据 —— 要决定「写回旧内容」还是「删掉它」。既然判断不出来，
+   *      两种做法都可能破坏用户的安装状态（把存在的锁文件当不存在删掉，下次启动就换一套
+   *      解析结果），所以宁可不更新。
+   *   2. 放在建备份之前，失败时连一份新备份都不会留下，备份环也不会被 prune 挤掉一份旧备份。
+   */
+  const lockPath = join(profile, 'pnpm-lock.yaml')
+  const lockBefore = snapshotFile(lockPath)
+  if (lockBefore.kind === 'unreadable') {
+    const reason = chineseFailure(
+      '读不到 profile 的 pnpm-lock.yaml，已取消更新（文件没有被改动）',
+      new Error(lockBefore.detail),
+    )
+    steps.push({ id: 'write', ok: false, detail: reason })
+    return failed(reason, { path: target })
+  }
   const backup = backupBeforeUpdate({
     profileDir: profile,
     previousVersion,
@@ -375,10 +439,9 @@ export async function installVersion(version: string): Promise<InstallResult> {
   // profile with half a manifest (the backup holds the original either way).
   //
   // 恢复边界（交接文档 5.3）：只改回 package.json 是不够的 —— pnpm-lock.yaml 可能已经被
-  // pnpm 写过一半，node_modules 也可能部分换过。所以先把锁文件的内容与存在性也记下来，
-  // 同步失败（返回失败**或抛异常**）都走同一条恢复路径，并分别记录每一处的恢复结果。
-  const lockPath = join(profile, 'pnpm-lock.yaml')
-  const lockBefore = snapshotFile(lockPath)
+  // pnpm 写过一半，node_modules 也可能部分换过。锁文件的快照已在建备份之前取好（读不出来
+  // 就不会走到这里），同步失败（返回失败**或抛异常**）都走同一条恢复路径，并分别记录
+  // 每一处的恢复结果。
   try {
     /**
      * 写入规范包名，并把旧裸名那一行删掉。
@@ -417,15 +480,18 @@ export async function installVersion(version: string): Promise<InstallResult> {
       const detail = syncThrew === undefined ? synced.detail : `同步钩子抛出异常：${synced.detail}`
       steps.push({ id: 'write', ok: false, detail: recovery.summary })
       if (!recovery.filesRestored) {
-        // 文件都没恢复：不能说「没有改动」，把没恢复的部分和修复入口一起交出来。
+        // 文件都没恢复：不能说「清单与锁文件已恢复」，把没恢复的部分和修复入口一起交出来。
         return failed(
-          `安装依赖失败（${detail}），且回滚未完成。${recovery.summary}。`
-            + `profile 的备份在 ${backupPath}（restore.json 记着原 spec），可据此手动修复`,
+          `安装依赖失败（${detail}），且文件回滚未完成。${recovery.summary}。`
+            + `profile 的备份在 ${backupPath}（restore.json 记着原 spec），可据此手动修复；`
+            + '修好后重启 DSH 让宿主重新安装依赖',
           { path: target, backupPath },
         )
       }
       return failed(
-        `安装依赖失败，已回滚，插件和数据都没有改动：${detail}`,
+        `安装依赖失败（${detail}）。package.json 与 pnpm-lock.yaml 已恢复成更新前的样子，`
+          + '但 node_modules 在同步过程中可能已被部分改动 —— 这一点无法从插件侧确认。'
+          + '再点一次「更新」可以重试；也可以直接重启 DSH，宿主会按写回的清单与锁文件把依赖装回去。',
         { path: target, backupPath },
       )
     }
@@ -438,38 +504,53 @@ export async function installVersion(version: string): Promise<InstallResult> {
     steps.push({ id: 'write', ok: false, detail: `${reason}；${recovery.summary}` })
     if (!recovery.filesRestored) {
       return failed(
-        `${reason}，且回滚未完成。${recovery.summary}。备份在 ${backupPath}（restore.json 记着原 spec）`,
+        `${reason}，且文件回滚未完成。${recovery.summary}。备份在 ${backupPath}（restore.json 记着原 spec），`
+          + '可据此手动修复；修好后重启 DSH 让宿主重新安装依赖',
         { path: target, backupPath },
       )
     }
-    return failed(`${reason}，已回滚：${recovery.summary}`, { path: target, backupPath })
+    return failed(
+      `${reason}。${recovery.summary}；node_modules 未做同步，应当仍是更新前的样子，`
+        + '但插件侧无法逐字节确认。重启 DSH 可让宿主按现有清单与锁文件重建依赖。',
+      { path: target, backupPath },
+    )
   }
 }
 
 /**
- * 一个文件在改动前的样子：内容 + 存不存在。
+ * 一个文件在改动前的样子：内容 + 存不存在 + 读不读得出来。
  *
  * 只记内容不够 —— 原来没有这个文件、更新造出一个，回滚时就得删掉它，而不是写回空字符串。
+ *
+ * **读失败与不存在必须分开**。以前把任何读取异常都当成「文件不存在」，于是锁文件被
+ * 杀毒软件锁住、或权限不足读不了的时候，恢复流程会认为「更新前没有锁文件」，
+ * 直接把一个真实存在的 lockfile 删掉 —— 用户的下一个启动就变成了「按新的解析结果装依赖」。
+ * 只有 ENOENT（含 ENOTDIR：路径中间不是目录，等效于不存在）才算真的不存在。
  */
-interface FileSnapshot {
-  existed: boolean
-  content?: string
-}
+type FileSnapshot =
+  | { kind: 'missing' }
+  | { kind: 'present'; content: string }
+  | { kind: 'unreadable'; detail: string }
 
-/** 读一个文件的内容与存在性；读不出来当「不存在」，恢复时按不存在处理。 */
+/** 读一个文件的内容与存在性；只有「确实不存在」才算不存在，其余读取错误原样报出来。 */
 function snapshotFile(path: string): FileSnapshot {
   try {
-    return { existed: true, content: readFileSync(path, 'utf8') }
-  } catch {
-    return { existed: false }
+    return { kind: 'present', content: readFileSync(path, 'utf8') }
+  } catch (error: unknown) {
+    const code = (error as { code?: unknown } | null)?.code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'missing' }
+    return { kind: 'unreadable', detail: error instanceof Error ? error.message : String(error) }
   }
 }
 
 /** 把文件恢复成快照里的样子：原来有就写回原内容，原来没有就删掉。 */
 function restoreFile(path: string, snapshot: FileSnapshot): { ok: boolean; detail?: string } {
+  if (snapshot.kind === 'unreadable') {
+    return { ok: false, detail: '更新前没能读出这个文件，无法判断该恢复成什么' }
+  }
   try {
-    if (snapshot.existed) {
-      writeFileSync(`${path}.tmp`, snapshot.content ?? '', 'utf8')
+    if (snapshot.kind === 'present') {
+      writeFileSync(`${path}.tmp`, snapshot.content, 'utf8')
       renameSync(`${path}.tmp`, path)
     } else {
       rmSync(path, { force: true })
@@ -507,13 +588,14 @@ async function recoverProfile(options: RecoverOptions): Promise<{ filesRestored:
   const notes: string[] = []
   let filesRestored = true
 
-  const manifest = restoreFile(options.pkgPath, { existed: true, content: options.originalManifest })
+  const manifest = restoreFile(options.pkgPath, { kind: 'present', content: options.originalManifest })
   if (manifest.ok) notes.push('package.json 已写回')
   else { filesRestored = false; notes.push(`package.json 写回失败（${manifest.detail ?? '未知原因'}）`) }
 
   const lock = restoreFile(options.lockPath, options.lockBefore)
-  if (lock.ok) notes.push(options.lockBefore.existed ? 'pnpm-lock.yaml 已写回' : 'pnpm-lock.yaml 已删除（更新前没有）')
-  else { filesRestored = false; notes.push(`pnpm-lock.yaml 恢复失败（${lock.detail ?? '未知原因'}）`) }
+  if (lock.ok) {
+    notes.push(options.lockBefore.kind === 'present' ? 'pnpm-lock.yaml 已写回' : 'pnpm-lock.yaml 已删除（更新前没有）')
+  } else { filesRestored = false; notes.push(`pnpm-lock.yaml 恢复失败（${lock.detail ?? '未知原因'}）`) }
 
   return { filesRestored, summary: notes.join('；') }
 }

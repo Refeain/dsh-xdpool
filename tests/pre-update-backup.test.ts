@@ -691,9 +691,13 @@ describe('installVersion：下载 → 校验 → 备份 → 写入', () => {
   })
 
   /**
-   * 同步返回失败：清单与锁文件都要回到更新前，且错误里不能出现「没有改动」以外的承诺。
+   * 同步返回失败：清单与锁文件都要回到更新前，且错误里只承诺能确认的那部分。
+   *
+   * 3.2.0 的提示是「已回滚，插件和数据都没有改动」—— 那句话超出了代码能知道的范围：
+   * pnpm 在失败前可能已经换过 node_modules 里的目录。现在只承认清单与锁文件，
+   * 并明确说 node_modules 未确认，再给出重试 / 重启两条出路。
    */
-  it('同步返回失败：清单与锁文件都回滚，错误说清已回滚', async () => {
+  it('同步返回失败：清单与锁文件都回滚，提示只承诺文件级恢复并说明 node_modules 未确认', async () => {
     const w = world()
     point(w)
     write(join(w.profile, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\nold: true\n")
@@ -707,13 +711,48 @@ describe('installVersion：下载 → 校验 → 备份 → 写入', () => {
     })
     const result = await installVersion(version)
     expect(result.ok).toBe(false)
-    expect(result.error).toContain('已回滚')
     expect(result.error).toContain('pnpm 退出码 1')
+    // 文件级恢复必须点明是哪两个文件。
+    expect(result.error).toContain('package.json 与 pnpm-lock.yaml 已恢复')
+    // 依赖目录的状态不在可确认范围，必须说出来。
+    expect(result.error).toContain('node_modules')
+    expect(result.error).toMatch(/无法.*确认|未确认/u)
+    // 不能承诺「都没有改动」。
+    expect(result.error).not.toContain('都没有改动')
+    // 要有可执行的出路。
+    expect(result.error).toMatch(/重试|重启/u)
     expect(readFileSync(join(w.profile, 'package.json'), 'utf8')).toBe(beforePkg)
     expect(readFileSync(join(w.profile, 'pnpm-lock.yaml'), 'utf8')).toBe(beforeLock)
     expect(result.steps?.at(-1)).toMatchObject({ id: 'write', ok: false })
     // 备份照旧留着，用户可以手动回退。
     expect(result.backupPath).toBeDefined()
+  })
+
+  /**
+   * 同步**部分改过 node_modules 之后**才失败：这正是「都没有改动」不成立的场景。
+   *
+   * 钩子里先往 node_modules 写一个文件、再返回失败。文件级恢复能回滚清单与锁文件，
+   * 却回不去那个目录 —— 提示必须承认这一点，而不是让用户以为一切照旧。
+   */
+  it('同步部分改过 node_modules 后失败时，提示承认依赖目录可能已被改动', async () => {
+    const w = world()
+    point(w)
+    const beforePkg = readFileSync(join(w.profile, 'package.json'), 'utf8')
+    const modules = join(w.profile, 'node_modules', PACKAGE_NAME)
+    serve(gzipSync(Buffer.from('fake tarball')))
+    setSyncImplementationForTest(async () => {
+      mkdirSync(modules, { recursive: true })
+      writeFileSync(join(modules, 'package.json'), '{"name":"half-installed"}', 'utf8')
+      return { ok: false, detail: 'pnpm 在替换依赖时被占用' }
+    })
+    const result = await installVersion(version)
+    expect(result.ok).toBe(false)
+    // 半成品仍然在盘上 —— 恢复代码不会去动它，所以提示必须承认。
+    expect(existsSync(join(modules, 'package.json'))).toBe(true)
+    expect(result.error).not.toContain('都没有改动')
+    expect(result.error).toContain('node_modules')
+    expect(result.error).toMatch(/部分改动|可能已/u)
+    expect(readFileSync(join(w.profile, 'package.json'), 'utf8')).toBe(beforePkg)
   })
 
   /**
@@ -731,8 +770,9 @@ describe('installVersion：下载 → 校验 → 备份 → 写入', () => {
     })
     const result = await installVersion(version)
     expect(result.ok).toBe(false)
-    expect(result.error).toMatch(/已回滚/u)
     expect(result.error).toContain('spawn pnpm ENOENT')
+    expect(result.error).toContain('package.json 与 pnpm-lock.yaml 已恢复')
+    expect(result.error).not.toContain('都没有改动')
     expect(readFileSync(join(w.profile, 'package.json'), 'utf8')).toBe(beforePkg)
   })
 
@@ -843,6 +883,102 @@ describe('installVersion：下载 → 校验 → 备份 → 写入', () => {
     const dirs = stagingDirs().filter(dir => !stagingBefore.has(dir))
     expect(dirs.length).toBeGreaterThanOrEqual(2)
     expect(new Set(dirs).size).toBe(dirs.length)
+  })
+
+  /**
+   * 锁文件**存在但读不出来**时不许更新。
+   *
+   * 3.2.0 的 snapshotFile 把所有读取异常都当成「文件不存在」，于是恢复阶段会按「更新前没有
+   * 锁文件」处理 —— 把一个真实存在的 lockfile 删掉，用户的下一启动就换了整套解析结果。
+   * 构造方式：把 pnpm-lock.yaml 做成**目录**，readFileSync 会抛 EISDIR（不是 ENOENT），
+   * 正好落在「存在但读不出」这一格。
+   */
+  it('锁文件存在但读不出来时取消更新，既不动清单也不删文件', async () => {
+    const w = world()
+    point(w)
+    const lockPath = join(w.profile, 'pnpm-lock.yaml')
+    mkdirSync(lockPath, { recursive: true })
+    writeFileSync(join(lockPath, 'inner.txt'), 'still here', 'utf8')
+    const beforePkg = readFileSync(join(w.profile, 'package.json'), 'utf8')
+    serve(gzipSync(Buffer.from('fake tarball')))
+    const result = await installVersion(version)
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('pnpm-lock.yaml')
+    expect(result.error).toContain('读不到')
+    // 文件（这里是目录）必须原样留着 —— 被当成「不存在」就会 rmSync 掉。
+    expect(existsSync(join(lockPath, 'inner.txt'))).toBe(true)
+    expect(readFileSync(join(w.profile, 'package.json'), 'utf8')).toBe(beforePkg)
+    // 快照在建备份之前取，失败时连一份新备份都不该留下。
+    expect(existsSync(join(w.data, 'pre-update'))).toBe(false)
+    expect(result.backupPath).toBeUndefined()
+  })
+
+  /** 锁文件本来就不存在时不算错误 —— 那是正常状态，更新应当照常进行。 */
+  it('锁文件确实不存在时照常更新（不存在不是错误）', async () => {
+    const w = world()
+    point(w)
+    expect(existsSync(join(w.profile, 'pnpm-lock.yaml'))).toBe(false)
+    serve(gzipSync(Buffer.from('fake tarball')))
+    const result = await installVersion(version)
+    expect(result.ok, result.error).toBe(true)
+  })
+
+  /**
+   * 同一 profile 的并发更新合并成一次。
+   *
+   * `POST /plugins/dsh-xdpool/update` 是 HTTP 入口，两个标签页（或脚本）可以同时打进来。
+   * 不做互斥的话双方各读一份旧清单、各建一份备份，后成的那次还会把清单与锁文件交错写。
+   */
+  it('并发调用合并成一次：只建一份备份，两次拿到同一个结果', async () => {
+    const w = world()
+    point(w)
+    let syncCalls = 0
+    serve(gzipSync(Buffer.from('fake tarball')))
+    setSyncImplementationForTest(async () => {
+      syncCalls += 1
+      // 给第二个请求足够的时间挤进同一个窗口。
+      await new Promise<void>(done => { setTimeout(done, 50) })
+      return { ok: true, detail: 'test stub' }
+    })
+    const [first, second] = await Promise.all([installVersion(version), installVersion(version)])
+    expect(first.ok, first.error).toBe(true)
+    expect(second.ok, second.error).toBe(true)
+    // 只同步一次 = 只有一次写入过程。
+    expect(syncCalls).toBe(1)
+    // 只产生一份备份。
+    expect(readdirSync(join(w.data, 'pre-update'))).toHaveLength(1)
+    expect(second.backupPath).toBe(first.backupPath)
+  })
+
+  /** 并发窗口结束后要能重新开始 —— 合并的只是「同时进行中的那一次」。 */
+  it('并发窗口过后再更新会另起一次（不永久锁死）', async () => {
+    const w = world()
+    point(w)
+    serve(gzipSync(Buffer.from('fake tarball')))
+    const first = await installVersion(version)
+    expect(first.ok, first.error).toBe(true)
+    const second = await installVersion(version)
+    expect(second.ok, second.error).toBe(true)
+    expect(second.backupPath).not.toBe(first.backupPath)
+    expect(readdirSync(join(w.data, 'pre-update'))).toHaveLength(2)
+  })
+
+  /** 并发时失败也要一致：两个人看到同一个失败，而不是一个成功一个回滚。 */
+  it('并发更新失败时两次拿到同一条错误，备份只有一份', async () => {
+    const w = world()
+    point(w)
+    const beforePkg = readFileSync(join(w.profile, 'package.json'), 'utf8')
+    serve(gzipSync(Buffer.from('fake tarball')))
+    setSyncImplementationForTest(async () => {
+      await new Promise<void>(done => { setTimeout(done, 50) })
+      return { ok: false, detail: 'pnpm 退出码 1' }
+    })
+    const [first, second] = await Promise.all([installVersion(version), installVersion(version)])
+    expect(first.ok).toBe(false)
+    expect(second.ok).toBe(false)
+    expect(second.error).toBe(first.error)
+    expect(readdirSync(join(w.data, 'pre-update'))).toHaveLength(1)
+    expect(readFileSync(join(w.profile, 'package.json'), 'utf8')).toBe(beforePkg)
   })
 
   setSyncImplementationForTest(async () => ({ ok: true, detail: 'test stub' }))
